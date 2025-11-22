@@ -1,5 +1,8 @@
-import { cancelSalesOrder, createSalesOrder, getSalesOrder, listSalesOrders, saveSalesOrderDraft, parseOrderDateContext, peekNextSalesOrderNumberForContext, } from '../stores/salesOrdersStore.js';
+import { cancelSalesOrder, createSalesOrder, getSalesOrder, listSalesOrders, parseOrderDateContext, peekNextSalesOrderNumberForContext, } from '../stores/salesOrdersStore.js';
 import { MAX_PURCHASE_ORDER_RANGE_MS } from '../../../shared/datetime/ranges.js';
+const saveSalesOrderDraft = (payload) => {
+    throw new Error('[salesOrders] Draft endpoints are not supported in this server build.');
+};
 const parseUtcTimestamp = (value) => {
     if (!value) {
         return null;
