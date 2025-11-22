@@ -1,0 +1,408 @@
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import React from 'react';
+
+import NewOrderForm from '@/src/domains/orders/components/NewOrderForm';
+import type { Partner } from '@/src/services/orders';
+import type { Warehouse } from '@/src/services/wh';
+import { createEmptyProduct } from '@/src/domains/products';
+import { formatDateTimeLocalFromUtc } from '@/shared/datetime/kst';
+
+const showToastMock = vi.fn();
+const FIXED_NOW = new Date('2025-06-10T00:00:00.000Z');
+const toPastLocalDateTime = (minutesAgo = 60) =>
+  formatDateTimeLocalFromUtc(FIXED_NOW.getTime() - minutesAgo * 60 * 1000);
+const toFutureLocalDateTime = (minutesAhead = 60) =>
+  formatDateTimeLocalFromUtc(FIXED_NOW.getTime() + minutesAhead * 60 * 1000);
+let dateNowSpy: ReturnType<typeof vi.spyOn> | null = null;
+
+beforeAll(() => {
+  dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => FIXED_NOW.getTime());
+});
+
+afterAll(() => {
+  dateNowSpy?.mockRestore();
+});
+
+vi.mock('@/src/components/Toaster', async () => {
+  const actual = await vi.importActual<typeof import('@/src/components/Toaster')>(
+    '@/src/components/Toaster',
+  );
+  return {
+    ...actual,
+    useToast: () => showToastMock,
+  };
+});
+
+describe('NewOrderForm product loading', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    showToastMock.mockReset();
+  });
+
+  it('fetches products via onReloadProducts when none are loaded yet', async () => {
+    const partners: Partner[] = [
+      {
+        id: 'partner-1',
+        type: 'SUPPLIER',
+        name: '테스트 공급사',
+        isActive: true,
+      },
+    ];
+    const warehouses: Warehouse[] = [
+      { id: 'wh-1', code: 'W1', name: '1창고' },
+    ];
+    const product = {
+      ...createEmptyProduct(),
+      productId: 'prod-1',
+      legacyProductId: 1,
+      sku: 'SKU-1',
+      name: '테스트 상품',
+      unit: 'EA',
+      inventory: [{ warehouseCode: 'W1', onHand: 64, reserved: 0 }],
+    };
+
+    const onReloadProducts = vi.fn().mockResolvedValue([product]);
+
+    render(
+      <NewOrderForm
+        defaultKind="purchase"
+        partners={partners}
+        warehouses={warehouses}
+        products={undefined}
+        onReloadProducts={onReloadProducts}
+        onSubmit={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(onReloadProducts).toHaveBeenCalledTimes(1);
+    });
+
+    const option = await screen.findByRole('option', { name: '테스트 상품 (SKU-1)' });
+    expect(option.textContent).toContain('테스트 상품');
+  });
+
+  it('stops showing loading message after fetching empty product list', async () => {
+    const partners: Partner[] = [
+      {
+        id: 'partner-1',
+        type: 'SUPPLIER',
+        name: '테스트 공급사',
+        isActive: true,
+      },
+    ];
+    const warehouses: Warehouse[] = [
+      { id: 'wh-1', code: 'W1', name: '1창고' },
+    ];
+    const onReloadProducts = vi.fn().mockResolvedValue([]);
+
+    render(
+      <NewOrderForm
+        defaultKind="purchase"
+        partners={partners}
+        warehouses={warehouses}
+        products={undefined}
+        onReloadProducts={onReloadProducts}
+        onSubmit={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(onReloadProducts).toHaveBeenCalledTimes(1);
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole('option', { name: '상품을 불러오는 중...' })).toBeNull();
+    });
+  });
+
+  it('retries loading products when a previous attempt failed and no data is present', async () => {
+    const partners: Partner[] = [
+      {
+        id: 'partner-1',
+        type: 'SUPPLIER',
+        name: '테스트 공급사',
+        isActive: true,
+      },
+    ];
+    const warehouses: Warehouse[] = [
+      { id: 'wh-1', code: 'W1', name: '1창고' },
+    ];
+    const product = {
+      ...createEmptyProduct(),
+      productId: 'prod-1',
+      legacyProductId: 1,
+      sku: 'SKU-1',
+      name: '테스트 상품',
+      unit: 'EA',
+      inventory: [{ warehouseCode: 'W1', onHand: 120, reserved: 0 }],
+    };
+
+    const onReloadProducts = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('network failed'))
+      .mockResolvedValueOnce([product]);
+
+    render(
+      <NewOrderForm
+        defaultKind="purchase"
+        partners={partners}
+        warehouses={warehouses}
+        products={undefined}
+        onReloadProducts={onReloadProducts}
+        onSubmit={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(onReloadProducts).toHaveBeenCalledTimes(1);
+    });
+
+    const retryButton = await screen.findByRole('button', { name: '다시 시도' });
+
+    const user = userEvent.setup();
+    await user.click(retryButton);
+
+    await waitFor(() => {
+      expect(onReloadProducts).toHaveBeenCalledTimes(2);
+    });
+
+    const option = await screen.findByRole('option', { name: '테스트 상품 (SKU-1)' });
+    expect(option.textContent).toContain('테스트 상품');
+  });
+
+  it('filters product options by selected warehouse and shows the current stock', async () => {
+    const partners: Partner[] = [
+      {
+        id: 'partner-1',
+        type: 'SUPPLIER',
+        name: '공급 파트너',
+        isActive: true,
+      },
+    ];
+    const warehouses: Warehouse[] = [
+      { id: 'wh-1', code: 'W1', name: 'A창고' },
+      { id: 'wh-2', code: 'W2', name: 'B창고' },
+    ];
+    const productInW1 = {
+      ...createEmptyProduct(),
+      productId: 'prod-a',
+      legacyProductId: 101,
+      sku: 'SKU-A',
+      name: '반도체 A',
+      unit: 'EA',
+      inventory: [
+        { warehouseCode: 'W1', onHand: 31, reserved: 0 },
+        { warehouseCode: 'W2', onHand: 9, reserved: 0 },
+      ],
+    };
+
+    const productInW2 = {
+      ...createEmptyProduct(),
+      productId: 'prod-b',
+      legacyProductId: 102,
+      sku: 'SKU-B',
+      name: '반도체 B',
+      unit: 'EA',
+      inventory: [{ warehouseCode: 'W2', onHand: 9, reserved: 0 }],
+    };
+
+    render(
+      <NewOrderForm
+        defaultKind="purchase"
+        partners={partners}
+        warehouses={warehouses}
+        products={[productInW1, productInW2]}
+        onSubmit={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    const warehouseSelect = screen.getByLabelText('창고') as HTMLSelectElement;
+    const user = userEvent.setup();
+    await user.selectOptions(warehouseSelect, 'W1');
+
+    const filterCheckbox = screen.getByRole('checkbox', { name: '해당 창고 보유품만 보기' });
+    await user.click(filterCheckbox);
+
+    await waitFor(() => {
+      expect(screen.queryByRole('option', { name: /SKU-B/ })).toBeNull();
+    });
+
+    const productSelect = await screen.findByLabelText('상품');
+    await user.selectOptions(productSelect, 'SKU-A');
+
+    await screen.findByText('현재 재고: 31 EA (A창고)');
+  });
+
+  it('shows zero quantity for registered items without stock in the selected warehouse', async () => {
+    const partners: Partner[] = [
+      {
+        id: 'partner-1',
+        type: 'SUPPLIER',
+        name: '공급 파트너',
+        isActive: true,
+      },
+    ];
+    const warehouses: Warehouse[] = [
+      { id: 'wh-1', code: 'W1', name: 'A창고' },
+      { id: 'wh-2', code: 'W2', name: 'B창고' },
+    ];
+    const productWithZeroStock = {
+      ...createEmptyProduct(),
+      productId: 'prod-zero',
+      legacyProductId: 103,
+      sku: 'SKU-Z',
+      name: '반도체 Z',
+      unit: 'EA',
+      inventory: [{ warehouseCode: 'W1', onHand: 0, reserved: 0 }],
+    };
+
+    render(
+      <NewOrderForm
+        defaultKind="purchase"
+        partners={partners}
+        warehouses={warehouses}
+        products={[productWithZeroStock]}
+        onSubmit={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    const warehouseSelect = screen.getByLabelText('창고') as HTMLSelectElement;
+    const user = userEvent.setup();
+    await user.selectOptions(warehouseSelect, 'W1');
+
+    const productSelect = await screen.findByLabelText('상품');
+    await screen.findByRole('option', { name: '반도체 Z (SKU-Z)' });
+    await user.selectOptions(productSelect, 'SKU-Z');
+
+    await screen.findByText('현재 재고: 0 EA (A창고)');
+  });
+});
+
+describe('NewOrderForm submission feedback', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    showToastMock.mockReset();
+  });
+
+  const buildCommonProps = (kind: 'purchase' | 'sales') => {
+    const partner: Partner = {
+      id: kind === 'purchase' ? 'partner-supplier' : 'partner-customer',
+      type: kind === 'purchase' ? 'SUPPLIER' : 'CUSTOMER',
+      name: kind === 'purchase' ? '공급사' : '고객사',
+      isActive: true,
+    };
+
+    const warehouses: Warehouse[] = [{ id: 'wh-1', code: 'W1', name: '1창고' }];
+    const product = {
+      ...createEmptyProduct(),
+      productId: 'prod-1',
+      legacyProductId: 1,
+      sku: 'SKU-1',
+      name: '테스트 상품',
+      unit: 'EA',
+      inventory: [{ warehouseCode: 'W1', onHand: 120, reserved: 0 }],
+    };
+
+    return {
+      defaultKind: kind,
+      partners: [partner],
+      warehouses,
+      products: [product],
+    };
+  };
+
+  const fillValidForm = async (kind: 'purchase' | 'sales') => {
+    const scheduledAtLabel = kind === 'purchase' ? '입고일' : '출고일';
+    const scheduledAtInput = screen.getByLabelText(scheduledAtLabel) as HTMLInputElement;
+    const safeScheduledAt = toPastLocalDateTime(120);
+    fireEvent.change(scheduledAtInput, { target: { value: safeScheduledAt } });
+
+    const productSelect = await screen.findByLabelText('상품');
+    const user = userEvent.setup();
+    await user.selectOptions(productSelect, 'SKU-1');
+
+    const quantityInput = screen.getByLabelText('수량 / 단위');
+    await user.clear(quantityInput);
+    await user.type(quantityInput, '3');
+
+    return user;
+  };
+
+  it('prevents submission when scheduled date is in the future', async () => {
+    const onSubmit = vi.fn();
+
+    render(
+      <NewOrderForm {...buildCommonProps('purchase')} onSubmit={onSubmit} />,
+    );
+
+    const scheduledAtInput = screen.getByLabelText('입고일');
+    const futureValue = toFutureLocalDateTime(60);
+    fireEvent.change(scheduledAtInput, { target: { value: futureValue } });
+
+    expect(
+      await screen.findByText('⚠️ 미래 시점의 입출고는 등록할 수 없습니다. 오늘 또는 과거 날짜만 선택해주세요.'),
+    ).toBeInTheDocument();
+
+    const submitButton = screen.getByRole('button', { name: '저장' });
+    const user = userEvent.setup();
+    await user.click(submitButton);
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(
+      screen.getByText('미래 시점의 입출고는 등록할 수 없습니다.'),
+    ).toBeInTheDocument();
+  });
+
+  it('shows an error toast when purchase order submission fails due to network issues', async () => {
+    const networkError = Object.assign(new Error('네트워크 오류'), { status: 0, name: 'HttpError' });
+    const onSubmit = vi.fn().mockRejectedValue(networkError);
+
+    render(
+      <NewOrderForm {...buildCommonProps('purchase')} onSubmit={onSubmit} />, 
+    );
+
+    const user = await fillValidForm('purchase');
+    const submitButton = screen.getByRole('button', { name: '저장' });
+    await user.click(submitButton);
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith(
+        '입고 처리에 실패했습니다.',
+        expect.objectContaining({ tone: 'error' }),
+      );
+    });
+    expect(screen.queryByText('네트워크 오류')).not.toBeInTheDocument();
+  });
+
+  it('shows an error toast when sales order submission fails due to server issues', async () => {
+    const serverError = Object.assign(new Error('Server exploded'), { status: 500, name: 'HttpError' });
+    const onSubmit = vi.fn().mockRejectedValue(serverError);
+
+    render(
+      <NewOrderForm {...buildCommonProps('sales')} onSubmit={onSubmit} />, 
+    );
+
+    const user = await fillValidForm('sales');
+    const submitButton = screen.getByRole('button', { name: '저장' });
+    await user.click(submitButton);
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    await waitFor(() => {
+      expect(showToastMock).toHaveBeenCalledWith(
+        '출고 처리에 실패했습니다.',
+        expect.objectContaining({ tone: 'error' }),
+      );
+    });
+    expect(screen.queryByText('Server exploded')).not.toBeInTheDocument();
+  });
+});

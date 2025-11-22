@@ -1,0 +1,24 @@
+# MSIX Conversion Accelerator
+
+PackageName: 80AB1D11.STOCKWISE_aysafcjb7mte4
+
+PublisherName: 타야야야잇
+
+PackageVersion: 0.1.1.0
+
+EligibleForConversion: Yes
+
+ConversionStatus: Package Created. Need Validation
+
+Edition: Microsoft Windows 11 Pro
+
+MinimumOSVersion: 24H2
+
+MinimumOSBuild: 26100.7171
+
+Architecture: 64
+
+MSIXConversionToolVersion: 1.2024.405.0
+
+AcceleratorVersion: 1.0.0
+

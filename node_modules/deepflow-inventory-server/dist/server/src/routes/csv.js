@@ -1,0 +1,1113 @@
+import { randomUUID } from 'node:crypto';
+import { validateProductPayload, __findProductBySku, __getProductRecords, __upsertProduct, } from './products.js';
+import { ensureWarehouseSeedData, findWarehouseByCode, findWarehouseByName, listWarehouses, findOrCreateWarehouseByName, } from '../stores/warehousesStore.js';
+import { ensureLocationSeedData, findLocationByCode, listLocations, findOrCreateLocation, } from '../stores/locationsStore.js';
+const CSV_TYPES = ['products', 'initial_stock', 'movements'];
+const CSV_HEADER_CONFIG = {
+    products: {
+        required: ['sku', 'name', 'category'],
+        optional: [
+            'abcGrade',
+            'xyzGrade',
+            'dailyAvg',
+            'dailyStd',
+            'subCategory',
+            'brand',
+            'unit',
+            'packCase',
+            'bufferRatio',
+            'isActive',
+            'onHand',
+            'reserved',
+            'risk',
+            'expiryDays',
+            'supplyPrice',
+            'salePrice',
+            'warehouseLocation',
+        ],
+    },
+    initial_stock: {
+        required: ['sku', 'warehouse', 'location', 'onHand'],
+        optional: ['reserved'],
+    },
+    movements: {
+        required: ['sku', 'warehouse', 'location', 'partner', 'type', 'quantity'],
+        optional: ['reference', 'occurredAt'],
+    },
+};
+const TEMPLATE_ROW_LIMIT = 5;
+const sanitizeHeader = (value) => value.trim().toLowerCase().replace(/[\s_\-./]+/g, '');
+const PRODUCT_HEADER_SYNONYMS = {
+    sku: ['sku', '품목코드', '상품코드', 'itemcode', 'item_code', 'code'],
+    name: ['name', 'productname', '상품명', '품목명', '제품명', 'description'],
+    category: ['category', '카테고리', '분류', '대분류', '품목분류'],
+    subCategory: ['subcategory', '하위카테고리', '중분류', '소분류'],
+    brand: ['brand', '브랜드'],
+    unit: ['unit', 'unitofmeasure', 'uom', '단위', '측정단위'],
+    packCase: ['packcase', 'pack_case', 'pack/case', '포장단위', '묶음단위'],
+    abcGrade: ['abcgrade', 'abc', 'abc등급', 'abc 등급'],
+    xyzGrade: ['xyzgrade', 'xyz', 'xyz등급', 'xyz 등급'],
+    bufferRatio: ['bufferratio', 'buffer_ratio', 'buffer ratio', '버퍼율', '안전율'],
+    dailyAvg: [
+        'dailyavg',
+        'average_daily_demand',
+        'avgdemand',
+        '월평균출고',
+        '평균일수요',
+        '평균출고량',
+    ],
+    dailyStd: [
+        'dailystd',
+        'demandstddev',
+        'stddev',
+        'sigma',
+        '수요표준편차',
+        '표준편차',
+    ],
+    isActive: ['isactive', '활성화', '판매중', '사용여부'],
+    onHand: ['onhand', 'currentstock', '현재고', '재고', '재고수량', '총수량'],
+    reserved: ['reserved', '할당', '예약', '예약재고'],
+    risk: ['risk', 'riskindicator', '위험도', '리스크'],
+    expiryDays: ['expirydays', 'shelflife', '유통기한', '유통일수'],
+    pack: ['pack', '포장', 'packqty'],
+    casePack: ['casepack', '케이스포장', 'case qty'],
+    bufferDays: ['bufferdays', '안전기간'],
+    supplyPrice: ['supplyprice', 'purchaseprice', 'cost', 'unitcost', 'buyprice', '구매가', '매입가', '매입단가'],
+    salePrice: ['saleprice', 'listprice', 'retailprice', 'sellingprice', '판매가', '판매단가', '소비자가'],
+    warehouseLocation: [
+        'warehouselocation',
+        'warehouse_location',
+        'warehouse-location',
+        '창고명(상세위치)',
+        '창고명상세위치',
+        '창고상세',
+        '창고위치',
+        '창고명',
+    ],
+};
+const INITIAL_STOCK_HEADER_SYNONYMS = {
+    sku: ['sku', '품목코드', '상품코드', 'itemcode'],
+    warehouse: ['warehouse', '창고', '물류센터', 'warehousecode', 'wh'],
+    location: ['location', '로케이션', 'bin', 'shelf', 'rack', '위치', 'locationcode'],
+    onHand: ['onhand', 'currentstock', '재고', '재고수량', '현재고'],
+    reserved: ['reserved', '예약', '할당', 'reserve'],
+};
+const MOVEMENT_HEADER_SYNONYMS = {
+    sku: ['sku', '품목코드', '상품코드', 'itemcode'],
+    warehouse: ['warehouse', '창고', '물류센터', 'warehousecode', 'wh', '출고창고', '입고창고'],
+    location: ['location', '로케이션', 'bin', 'shelf', 'rack', '위치', 'locationcode'],
+    partner: ['partner', '거래처', '거래처코드', 'partnerid', '벤더', 'customer'],
+    quantity: ['quantity', 'qty', '수량', '수량ea', '입출고수량'],
+    type: ['type', '거래유형', '입출고', 'direction', 'inout', '입출고구분'],
+    reference: ['reference', 'refno', '참조번호', '문서번호', 'order', '주문번호'],
+    occurredAt: ['occurredat', 'date', '거래일', '발생일', '처리일', 'timestamp'],
+    memo: ['memo', '비고', '메모', '설명'],
+};
+const SYNONYM_LOOKUPS = {
+    products: buildSynonymLookup(PRODUCT_HEADER_SYNONYMS),
+    initial_stock: buildSynonymLookup(INITIAL_STOCK_HEADER_SYNONYMS),
+    movements: buildSynonymLookup(MOVEMENT_HEADER_SYNONYMS),
+};
+function buildSynonymLookup(source) {
+    const lookup = new Map();
+    Object.entries(source).forEach(([canonical, synonyms]) => {
+        const entries = new Set([canonical, ...synonyms]);
+        entries.forEach((entry) => {
+            const key = sanitizeHeader(entry);
+            if (!key) {
+                return;
+            }
+            lookup.set(key, canonical);
+        });
+    });
+    return lookup;
+}
+const DEFAULT_PRODUCT_TEMPLATE_SAMPLE = {
+    sku: 'SAMPLE-SKU-001',
+    name: 'Sample Product',
+    category: 'Processed Food',
+    subCategory: 'Instant Meal',
+    brand: 'StockConsole',
+    unit: 'EA',
+    packCase: '4/12',
+    abcGrade: 'B',
+    xyzGrade: 'Y',
+    bufferRatio: '0.20',
+    dailyAvg: '24',
+    dailyStd: '6',
+    isActive: 'true',
+    onHand: '480',
+    reserved: '30',
+    risk: '정상',
+    expiryDays: '90',
+    supplyPrice: '1080',
+    salePrice: '1450',
+    warehouseLocation: '서울 풀필먼트 센터(상온 A1 랙 존)',
+};
+const PRODUCT_TEMPLATE_COLUMNS = [
+    { header: '제품명', canonical: 'name' },
+    { header: 'SKU', canonical: 'sku' },
+    { header: '카테고리', canonical: 'category' },
+    { header: '하위카테고리', canonical: 'subCategory' },
+    { header: '구매가', canonical: 'supplyPrice' },
+    { header: '판매가', canonical: 'salePrice' },
+    { header: '창고명(상세위치)', canonical: 'warehouseLocation' },
+    { header: '총수량', canonical: 'onHand' },
+];
+const DEFAULT_INITIAL_STOCK_SAMPLE = {
+    sku: 'SAMPLE-SKU-001',
+    warehouse: 'ICN1',
+    location: 'A-01',
+    onHand: '480',
+    reserved: '30',
+};
+const DEFAULT_MOVEMENT_TEMPLATE_SAMPLE = {
+    sku: 'SAMPLE-SKU-001',
+    warehouse: 'ICN1',
+    location: 'A-01',
+    partner: 'SUP-0001',
+    type: 'INBOUND',
+    quantity: '120',
+    reference: 'ORDER-REF-2401',
+    occurredAt: new Date().toISOString().slice(0, 10),
+};
+const previewCache = new Map();
+const jobStore = new Map();
+const jobQueue = [];
+let activeJob = null;
+const warehouseCatalog = {
+    ICN1: { name: '인천 풀필먼트 센터', locations: ['A-01', 'A-02', 'B-01', 'B-02'] },
+    PUS1: { name: '부산 허브', locations: ['P-01', 'P-02', 'P-03'] },
+    DJN1: { name: '대전 물류센터', locations: ['D-01', 'D-02'] },
+};
+const partnerCatalog = new Set(['SUP-0001', 'SUP-0002', 'CUS-0001', 'CUS-0002']);
+const initialStockStore = new Map();
+const movementLog = [];
+let stockSeeded = false;
+function seedInitialStock(records) {
+    if (stockSeeded) {
+        return;
+    }
+    const baseSkus = records.slice(0, 3);
+    baseSkus.forEach((record, index) => {
+        const warehouses = Object.keys(warehouseCatalog);
+        const warehouse = warehouses[index % warehouses.length];
+        const location = warehouseCatalog[warehouse].locations[index % warehouseCatalog[warehouse].locations.length];
+        const key = buildStockKey(record.sku, warehouse, location);
+        initialStockStore.set(key, {
+            sku: record.sku,
+            warehouse,
+            location,
+            onHand: Math.max(record.onHand ?? 0, 0),
+            reserved: Math.max(record.reserved ?? 0, 0),
+        });
+    });
+    stockSeeded = true;
+}
+function buildStockKey(sku, warehouse, location) {
+    return `${sku}::${warehouse}::${location}`;
+}
+function parseCsv(text) {
+    const rows = [];
+    let current = '';
+    let currentRow = [];
+    let inQuotes = false;
+    for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+        if (char === '"') {
+            const nextChar = text[i + 1];
+            if (inQuotes && nextChar === '"') {
+                current += '"';
+                i += 1;
+                continue;
+            }
+            inQuotes = !inQuotes;
+            continue;
+        }
+        if (char === ',' && !inQuotes) {
+            currentRow.push(current);
+            current = '';
+            continue;
+        }
+        if ((char === '\n' || char === '\r') && !inQuotes) {
+            if (char === '\r' && text[i + 1] === '\n') {
+                i += 1;
+            }
+            currentRow.push(current);
+            rows.push(currentRow);
+            current = '';
+            currentRow = [];
+            continue;
+        }
+        current += char;
+    }
+    if (currentRow.length > 0 || current) {
+        currentRow.push(current);
+        rows.push(currentRow);
+    }
+    return rows
+        .map((row) => row.map((cell) => cell.trim()))
+        .filter((row) => row.length > 0 && row.some((cell) => cell.length > 0));
+}
+function escapeCsv(value) {
+    if (/[",\n\r]/.test(value)) {
+        return `"${value.replace(/"/g, '""')}"`;
+    }
+    return value;
+}
+function stringifyCsv(headers, rows) {
+    const headerLine = headers.map((header) => escapeCsv(header)).join(',');
+    const body = rows.map((row) => row.map((cell) => escapeCsv(cell ?? '')).join(',')).join('\n');
+    const content = body ? `${headerLine}\n${body}` : headerLine;
+    return `\uFEFF${content}`;
+}
+function resolveColumnsForType(headers, type) {
+    const lookup = SYNONYM_LOOKUPS[type];
+    const usedCanonicals = new Set();
+    const columnMappings = headers.map((original) => {
+        const normalized = sanitizeHeader(original);
+        const canonical = lookup.get(normalized);
+        if (canonical && !usedCanonicals.has(canonical)) {
+            usedCanonicals.add(canonical);
+            return {
+                original,
+                normalized,
+                canonical,
+                status: 'matched',
+            };
+        }
+        if (canonical) {
+            return {
+                original,
+                normalized,
+                canonical: null,
+                status: 'duplicate',
+                duplicateOf: canonical,
+            };
+        }
+        return {
+            original,
+            normalized,
+            canonical: null,
+            status: 'unknown',
+        };
+    });
+    const required = CSV_HEADER_CONFIG[type].required;
+    const missingRequired = required.filter((field) => !usedCanonicals.has(field));
+    return {
+        columnMappings,
+        missingRequired,
+        matchedCanonicals: usedCanonicals,
+    };
+}
+function buildCanonicalColumns(mappings) {
+    return mappings.map((mapping, index) => {
+        if (mapping.status === 'matched' && mapping.canonical) {
+            return mapping.canonical;
+        }
+        return `__extra_${index}`;
+    });
+}
+function buildHeaderWarnings(mappings) {
+    const warnings = [];
+    mappings.forEach((mapping) => {
+        if (mapping.status === 'duplicate' && mapping.duplicateOf) {
+            warnings.push(`${mapping.original} 열이 ${mapping.duplicateOf}와(과) 중복되었습니다.`);
+        }
+        if (mapping.status === 'unknown') {
+            warnings.push(`${mapping.original} 열은 지원하지 않는 필드입니다.`);
+        }
+    });
+    return warnings;
+}
+function scoreHeaderResolution(type, mappings, missingRequired) {
+    const requiredTotal = CSV_HEADER_CONFIG[type].required.length;
+    const optionalSet = new Set(CSV_HEADER_CONFIG[type].optional);
+    const requiredMatches = requiredTotal - missingRequired.length;
+    const optionalMatches = mappings.filter((mapping) => mapping.status === 'matched' && mapping.canonical && optionalSet.has(mapping.canonical)).length;
+    return requiredMatches * 100 + optionalMatches;
+}
+function resolveCsvHeaders(headers, requestedType) {
+    const trimmedHeaders = headers.map((header) => header.trim());
+    if (requestedType) {
+        const resolved = resolveColumnsForType(trimmedHeaders, requestedType);
+        return {
+            type: requestedType,
+            columnMappings: resolved.columnMappings,
+            canonicalColumns: buildCanonicalColumns(resolved.columnMappings),
+            missingRequired: resolved.missingRequired,
+            warnings: buildHeaderWarnings(resolved.columnMappings),
+        };
+    }
+    let best = null;
+    let bestScore = -1;
+    CSV_TYPES.forEach((candidateType) => {
+        const resolved = resolveColumnsForType(trimmedHeaders, candidateType);
+        if (resolved.missingRequired.length > 0) {
+            return;
+        }
+        const score = scoreHeaderResolution(candidateType, resolved.columnMappings, resolved.missingRequired);
+        if (score > bestScore) {
+            bestScore = score;
+            best = {
+                type: candidateType,
+                columnMappings: resolved.columnMappings,
+                canonicalColumns: buildCanonicalColumns(resolved.columnMappings),
+                missingRequired: [],
+                warnings: buildHeaderWarnings(resolved.columnMappings),
+            };
+        }
+    });
+    if (!best) {
+        const fallbackType = 'products';
+        const resolved = resolveColumnsForType(trimmedHeaders, fallbackType);
+        return {
+            type: fallbackType,
+            columnMappings: resolved.columnMappings,
+            canonicalColumns: buildCanonicalColumns(resolved.columnMappings),
+            missingRequired: resolved.missingRequired,
+            warnings: buildHeaderWarnings(resolved.columnMappings),
+        };
+    }
+    return best;
+}
+function requireCsvType(type) {
+    if (!type || !CSV_TYPES.includes(type)) {
+        throw new Error('지원하지 않는 CSV 유형입니다. (products, initial_stock, movements)');
+    }
+    return type;
+}
+function normalizeKey(value) {
+    return (value ?? '').trim();
+}
+function parseNumber(value) {
+    if (value === undefined || value === null) {
+        return undefined;
+    }
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return undefined;
+    }
+    const sanitized = trimmed
+        .replace(/원/gi, '')
+        .replace(/[₩$,]/g, '')
+        .replace(/\s+/g, '');
+    if (!sanitized) {
+        return undefined;
+    }
+    const parsed = Number(sanitized);
+    return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+function parseBoolean(value) {
+    if (!value) {
+        return undefined;
+    }
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'y', 'yes', '활성', 'enable', 'enabled'].includes(normalized)) {
+        return true;
+    }
+    if (['false', '0', 'n', 'no', '비활성', 'disable', 'disabled'].includes(normalized)) {
+        return false;
+    }
+    return undefined;
+}
+const toComparable = (value) => value.replace(/\s+/g, '').toLowerCase();
+function splitWarehouseLocation(value) {
+    const trimmed = value.trim();
+    if (!trimmed) {
+        return null;
+    }
+    const parenStart = trimmed.indexOf('(');
+    const parenEnd = trimmed.lastIndexOf(')');
+    if (parenStart !== -1 && parenEnd !== -1 && parenEnd > parenStart) {
+        const warehouse = trimmed.slice(0, parenStart).trim();
+        const location = trimmed.slice(parenStart + 1, parenEnd).trim();
+        if (warehouse && location) {
+            return { warehouse, location };
+        }
+    }
+    if (trimmed.includes('/')) {
+        const [warehouse, location] = trimmed.split('/').map((part) => part.trim());
+        if (warehouse && location) {
+            return { warehouse, location };
+        }
+    }
+    return null;
+}
+function parseWarehouseLocationField(raw) {
+    if (!raw || !raw.trim()) {
+        return { success: false, errors: ['창고명(상세위치) 필드는 비어 있을 수 없습니다.'] };
+    }
+    const parts = splitWarehouseLocation(raw);
+    if (!parts) {
+        return {
+            success: false,
+            errors: ['창고명(상세위치)는 "창고명(상세위치)" 또는 "창고코드/상세위치" 형식이어야 합니다.'],
+        };
+    }
+    ensureWarehouseSeedData();
+    ensureLocationSeedData();
+    const trimmedWarehouse = parts.warehouse.trim();
+    const trimmedLocation = parts.location.trim();
+    const warehouses = listWarehouses();
+    const warehouseComparable = toComparable(trimmedWarehouse);
+    let warehouseRecord = warehouses.find((warehouse) => toComparable(warehouse.code) === warehouseComparable) ??
+        warehouses.find((warehouse) => toComparable(warehouse.name) === warehouseComparable) ??
+        findWarehouseByCode(trimmedWarehouse) ??
+        findWarehouseByName(trimmedWarehouse);
+    if (!warehouseRecord) {
+        try {
+            warehouseRecord = findOrCreateWarehouseByName(trimmedWarehouse);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : '창고 정보를 처리하는 중 예상치 못한 오류가 발생했습니다.';
+            return { success: false, errors: [message] };
+        }
+    }
+    const locationComparable = toComparable(trimmedLocation);
+    const normalizedWarehouseCode = warehouseRecord.code;
+    const locationByCode = findLocationByCode(trimmedLocation);
+    if (locationByCode) {
+        if (toComparable(locationByCode.warehouseCode) !== toComparable(normalizedWarehouseCode)) {
+            return {
+                success: false,
+                errors: [`${trimmedLocation} 위치는 ${normalizedWarehouseCode} 창고에 속해 있지 않습니다.`],
+            };
+        }
+        return {
+            success: true,
+            value: { warehouseCode: normalizedWarehouseCode, locationCode: locationByCode.code },
+        };
+    }
+    const locations = listLocations();
+    let locationRecord = locations.find((location) => toComparable(location.warehouseCode) === toComparable(normalizedWarehouseCode) &&
+        toComparable(location.description) === locationComparable);
+    if (!locationRecord) {
+        try {
+            locationRecord = findOrCreateLocation(normalizedWarehouseCode, trimmedLocation);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : '상세 위치를 처리하는 중 예상치 못한 오류가 발생했습니다.';
+            return { success: false, errors: [message] };
+        }
+    }
+    if (toComparable(locationRecord.warehouseCode) !== toComparable(normalizedWarehouseCode)) {
+        return {
+            success: false,
+            errors: [`${trimmedLocation} 위치는 ${normalizedWarehouseCode} 창고에 속해 있지 않습니다.`],
+        };
+    }
+    return {
+        success: true,
+        value: { warehouseCode: normalizedWarehouseCode, locationCode: locationRecord.code },
+    };
+}
+const hasValue = (value) => typeof value === 'string' && value.trim().length > 0;
+function parseOptionalNonNegativeNumber(raw, label, errors) {
+    if (!hasValue(raw)) {
+        return undefined;
+    }
+    const parsed = parseNumber(raw);
+    if (parsed === undefined || Number.isNaN(parsed)) {
+        errors.push(`${label} 필드는 숫자여야 합니다.`);
+        return undefined;
+    }
+    if (parsed < 0) {
+        errors.push(`${label} 필드는 0 이상이어야 합니다.`);
+        return undefined;
+    }
+    return parsed;
+}
+function parseRequiredNonNegativeInteger(raw, label, errors) {
+    if (!hasValue(raw)) {
+        errors.push(`${label} 필드는 필수입니다.`);
+        return undefined;
+    }
+    const parsed = parseNumber(raw);
+    if (parsed === undefined || Number.isNaN(parsed)) {
+        errors.push(`${label} 필드는 숫자여야 합니다.`);
+        return undefined;
+    }
+    if (!Number.isInteger(parsed)) {
+        errors.push(`${label} 필드는 정수로 입력해 주세요.`);
+    }
+    if (parsed < 0) {
+        errors.push(`${label} 필드는 0 이상이어야 합니다.`);
+    }
+    return parsed;
+}
+function getCsvHeaders(type) {
+    const config = CSV_HEADER_CONFIG[type];
+    return [...config.required, ...config.optional];
+}
+function parseProductRow(raw, lineNumber) {
+    const errors = [];
+    const supplyPriceValue = parseOptionalNonNegativeNumber(raw.supplyPrice, '구매가', errors);
+    const salePriceValue = parseOptionalNonNegativeNumber(raw.salePrice, '판매가', errors);
+    const onHandValue = parseRequiredNonNegativeInteger(raw.onHand, '총수량', errors);
+    const locationResult = parseWarehouseLocationField(raw.warehouseLocation);
+    if (!locationResult.success) {
+        errors.push(...locationResult.errors);
+    }
+    const dailyAvgValue = parseOptionalNonNegativeNumber(raw.dailyAvg, '일평균수요', errors) ?? 0;
+    const dailyStdValue = parseOptionalNonNegativeNumber(raw.dailyStd, '수요표준편차', errors) ?? 0;
+    const reservedValue = parseOptionalNonNegativeNumber(raw.reserved, '예약 재고', errors) ?? 0;
+    const expiryDaysValue = parseOptionalNonNegativeNumber(raw.expiryDays, '유통일수', errors);
+    let bufferRatioValue;
+    if (hasValue(raw.bufferRatio)) {
+        const parsed = parseNumber(raw.bufferRatio);
+        if (parsed === undefined || Number.isNaN(parsed)) {
+            errors.push('버퍼율 필드는 숫자여야 합니다.');
+        }
+        else if (parsed < 0 || parsed > 1) {
+            errors.push('버퍼율 필드는 0 이상 1 이하이어야 합니다.');
+        }
+        else {
+            bufferRatioValue = parsed;
+        }
+    }
+    if (errors.length > 0) {
+        return {
+            index: lineNumber - 1,
+            lineNumber,
+            action: 'error',
+            raw,
+            messages: errors,
+        };
+    }
+    const normalizedOnHand = Math.max(0, Math.round(onHandValue ?? 0));
+    const inventoryEntry = locationResult.success
+        ? {
+            warehouseCode: locationResult.value.warehouseCode,
+            locationCode: locationResult.value.locationCode,
+            onHand: normalizedOnHand,
+            reserved: 0,
+        }
+        : undefined;
+    const candidate = {
+        sku: normalizeKey(raw.sku),
+        name: normalizeKey(raw.name),
+        category: normalizeKey(raw.category),
+        subCategory: normalizeKey(raw.subCategory),
+        brand: normalizeKey(raw.brand),
+        unit: normalizeKey(raw.unit) || 'EA',
+        packCase: normalizeKey(raw.packCase) || '1/1',
+        abcGrade: normalizeKey(raw.abcGrade) || 'B',
+        xyzGrade: normalizeKey(raw.xyzGrade) || 'Y',
+        bufferRatio: bufferRatioValue,
+        dailyAvg: dailyAvgValue,
+        dailyStd: dailyStdValue,
+        isActive: parseBoolean(raw.isActive),
+        onHand: normalizedOnHand,
+        reserved: reservedValue,
+        risk: normalizeKey(raw.risk) || '정상',
+        expiryDays: expiryDaysValue,
+        supplyPrice: supplyPriceValue,
+        salePrice: salePriceValue,
+    };
+    if (inventoryEntry) {
+        candidate.inventory = [inventoryEntry];
+    }
+    const validation = validateProductPayload(candidate);
+    if (!validation.success) {
+        return {
+            index: lineNumber - 1,
+            lineNumber,
+            action: 'error',
+            raw,
+            messages: validation.errors,
+        };
+    }
+    const { value } = validation;
+    const existing = __findProductBySku(value.sku);
+    return {
+        index: lineNumber - 1,
+        lineNumber,
+        action: existing ? 'update' : 'create',
+        raw,
+        payload: value,
+    };
+}
+function parseInitialStockRow(raw, lineNumber) {
+    const errors = [];
+    const sku = normalizeKey(raw.sku);
+    if (!sku) {
+        errors.push('sku 필드는 필수입니다.');
+    }
+    const product = sku ? __findProductBySku(sku) : undefined;
+    if (sku && !product) {
+        errors.push('존재하지 않는 SKU입니다.');
+    }
+    const warehouse = normalizeKey(raw.warehouse).toUpperCase();
+    if (!warehouse) {
+        errors.push('warehouse 필드는 필수입니다.');
+    }
+    else if (!warehouseCatalog[warehouse]) {
+        errors.push('등록되지 않은 창고 코드입니다.');
+    }
+    const location = normalizeKey(raw.location).toUpperCase();
+    if (!location) {
+        errors.push('location 필드는 필수입니다.');
+    }
+    else if (warehouse && warehouseCatalog[warehouse] && !warehouseCatalog[warehouse].locations.includes(location)) {
+        errors.push('창고에 존재하지 않는 보관위치입니다.');
+    }
+    const onHandValue = parseNumber(raw.onHand);
+    const reservedValue = parseNumber(raw.reserved);
+    if (onHandValue === undefined || Number.isNaN(onHandValue)) {
+        errors.push('onHand 필드는 숫자여야 합니다.');
+    }
+    if (reservedValue !== undefined && Number.isNaN(reservedValue)) {
+        errors.push('reserved 필드는 숫자여야 합니다.');
+    }
+    if (errors.length > 0) {
+        return {
+            index: lineNumber - 1,
+            lineNumber,
+            action: 'error',
+            raw,
+            messages: errors,
+        };
+    }
+    const payload = {
+        sku,
+        warehouse,
+        location,
+        onHand: Math.max(Math.round(onHandValue ?? 0), 0),
+        reserved: Math.max(Math.round(reservedValue ?? 0), 0),
+    };
+    const key = buildStockKey(sku, warehouse, location);
+    const existing = initialStockStore.get(key);
+    return {
+        index: lineNumber - 1,
+        lineNumber,
+        action: existing ? 'update' : 'create',
+        raw,
+        payload,
+    };
+}
+function parseMovementRow(raw, lineNumber) {
+    const errors = [];
+    const sku = normalizeKey(raw.sku);
+    if (!sku) {
+        errors.push('sku 필드는 필수입니다.');
+    }
+    const product = sku ? __findProductBySku(sku) : undefined;
+    if (sku && !product) {
+        errors.push('존재하지 않는 SKU입니다.');
+    }
+    const warehouse = normalizeKey(raw.warehouse).toUpperCase();
+    if (!warehouse) {
+        errors.push('warehouse 필드는 필수입니다.');
+    }
+    else if (!warehouseCatalog[warehouse]) {
+        errors.push('등록되지 않은 창고 코드입니다.');
+    }
+    const location = normalizeKey(raw.location).toUpperCase();
+    if (!location) {
+        errors.push('location 필드는 필수입니다.');
+    }
+    else if (warehouse && warehouseCatalog[warehouse] && !warehouseCatalog[warehouse].locations.includes(location)) {
+        errors.push('창고에 존재하지 않는 보관위치입니다.');
+    }
+    const partner = normalizeKey(raw.partner).toUpperCase();
+    if (!partner) {
+        errors.push('partner 필드는 필수입니다.');
+    }
+    else if (!partnerCatalog.has(partner)) {
+        errors.push('등록되지 않은 거래처 코드입니다.');
+    }
+    const quantityValue = parseNumber(raw.quantity);
+    if (quantityValue === undefined || Number.isNaN(quantityValue)) {
+        errors.push('quantity 필드는 숫자여야 합니다.');
+    }
+    else if (Math.round(quantityValue) === 0) {
+        errors.push('quantity 필드는 0이 될 수 없습니다.');
+    }
+    const type = normalizeKey(raw.type).toUpperCase();
+    let normalizedType;
+    if (!type) {
+        errors.push('type 필드는 필수입니다.');
+    }
+    else if (['IN', 'INBOUND', '입고'].includes(type)) {
+        normalizedType = 'INBOUND';
+    }
+    else if (['OUT', 'OUTBOUND', '출고'].includes(type)) {
+        normalizedType = 'OUTBOUND';
+    }
+    else {
+        errors.push('type 필드는 INBOUND 또는 OUTBOUND 이어야 합니다.');
+    }
+    const reference = normalizeKey(raw.reference);
+    const occurredAtRaw = normalizeKey(raw.occurredAt);
+    let occurredAt;
+    if (occurredAtRaw) {
+        const parsed = new Date(occurredAtRaw);
+        if (Number.isNaN(parsed.getTime())) {
+            errors.push('occurredAt 필드가 날짜 형식이 아닙니다.');
+        }
+        else {
+            occurredAt = parsed.toISOString();
+        }
+    }
+    if (errors.length > 0 || !normalizedType) {
+        return {
+            index: lineNumber - 1,
+            lineNumber,
+            action: 'error',
+            raw,
+            messages: errors,
+        };
+    }
+    const payload = {
+        sku,
+        warehouse,
+        location,
+        partner,
+        quantity: Math.round(quantityValue ?? 0),
+        type: normalizedType,
+        reference: reference || undefined,
+        occurredAt: occurredAt ?? new Date().toISOString(),
+    };
+    return {
+        index: lineNumber - 1,
+        lineNumber,
+        action: 'create',
+        raw,
+        payload,
+    };
+}
+function analyzeRows(type, columns, table) {
+    return table.map((cells, index) => {
+        const row = {};
+        columns.forEach((column, columnIndex) => {
+            row[column] = cells[columnIndex] ?? '';
+        });
+        const lineNumber = index + 2; // header is line 1
+        switch (type) {
+            case 'products':
+                return parseProductRow(row, lineNumber);
+            case 'initial_stock':
+                return parseInitialStockRow(row, lineNumber);
+            case 'movements':
+                return parseMovementRow(row, lineNumber);
+            default:
+                return {
+                    index,
+                    lineNumber,
+                    action: 'error',
+                    raw: row,
+                    messages: ['알 수 없는 CSV 유형입니다.'],
+                };
+        }
+    });
+}
+function summarizeRows(rows) {
+    return rows.reduce((acc, row) => {
+        if (row.action === 'error') {
+            acc.errorCount += 1;
+            return acc;
+        }
+        if (row.action === 'create') {
+            acc.newCount += 1;
+        }
+        else {
+            acc.updateCount += 1;
+        }
+        return acc;
+    }, { total: rows.length, newCount: 0, updateCount: 0, errorCount: 0 });
+}
+function queueJob(job) {
+    jobQueue.push(job);
+    jobStore.set(job.id, job);
+    processQueue();
+}
+function processQueue() {
+    if (activeJob) {
+        return;
+    }
+    const job = jobQueue.shift();
+    if (!job) {
+        return;
+    }
+    activeJob = job;
+    job.status = 'processing';
+    job.updatedAt = Date.now();
+    const processNext = (index) => {
+        if (!activeJob || activeJob.id !== job.id) {
+            return;
+        }
+        if (index >= job.rows.length) {
+            job.status = 'completed';
+            job.updatedAt = Date.now();
+            activeJob = null;
+            setTimeout(() => processQueue(), 0);
+            return;
+        }
+        const row = job.rows[index];
+        if (row.action !== 'error' && row.payload) {
+            try {
+                applyRow(job.type, row);
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : '처리 중 알 수 없는 오류가 발생했습니다.';
+                job.errors.push({ ...row, action: 'error', messages: [message] });
+            }
+        }
+        job.processed = index + 1;
+        job.updatedAt = Date.now();
+        setTimeout(() => processNext(index + 1), 15);
+    };
+    setTimeout(() => processNext(0), 10);
+}
+function applyRow(type, row) {
+    if (!row.payload || row.action === 'error') {
+        return;
+    }
+    switch (type) {
+        case 'products':
+            __upsertProduct(row.payload);
+            break;
+        case 'initial_stock': {
+            const payload = row.payload;
+            const key = buildStockKey(payload.sku, payload.warehouse, payload.location);
+            initialStockStore.set(key, payload);
+            break;
+        }
+        case 'movements':
+            movementLog.push(row.payload);
+            break;
+        default:
+            break;
+    }
+}
+function formatProductTemplateValue(record, column) {
+    switch (column) {
+        case 'sku':
+            return record.sku;
+        case 'name':
+            return record.name;
+        case 'category':
+            return record.category;
+        case 'subCategory':
+            return record.subCategory ?? '';
+        case 'brand':
+            return record.brand ?? '';
+        case 'unit':
+            return record.unit;
+        case 'packCase':
+            return record.packCase;
+        case 'abcGrade':
+            return record.abcGrade;
+        case 'xyzGrade':
+            return record.xyzGrade;
+        case 'bufferRatio':
+            return Number.isFinite(record.bufferRatio) ? record.bufferRatio.toString() : '';
+        case 'dailyAvg':
+            return Number.isFinite(record.dailyAvg) ? record.dailyAvg.toString() : '';
+        case 'dailyStd':
+            return Number.isFinite(record.dailyStd) ? record.dailyStd.toString() : '';
+        case 'isActive':
+            return record.isActive ? 'true' : 'false';
+        case 'onHand':
+            return Number.isFinite(record.onHand) ? record.onHand.toString() : '';
+        case 'reserved':
+            return Number.isFinite(record.reserved) ? record.reserved.toString() : '';
+        case 'risk':
+            return record.risk;
+        case 'expiryDays': {
+            const { expiryDays } = record;
+            return expiryDays === null || expiryDays === undefined ? '' : expiryDays.toString();
+        }
+        case 'supplyPrice':
+            return record.supplyPrice === null || record.supplyPrice === undefined ? '' : record.supplyPrice.toString();
+        case 'salePrice':
+            return record.salePrice === null || record.salePrice === undefined ? '' : record.salePrice.toString();
+        case 'warehouseLocation': {
+            const firstInventory = record.inventory?.[0];
+            if (firstInventory) {
+                return `${firstInventory.warehouseCode}(${firstInventory.locationCode})`;
+            }
+            return DEFAULT_PRODUCT_TEMPLATE_SAMPLE.warehouseLocation ?? '';
+        }
+        default:
+            return '';
+    }
+}
+function buildProductTemplate() {
+    const headers = PRODUCT_TEMPLATE_COLUMNS.map((column) => column.header);
+    const canonicalColumns = PRODUCT_TEMPLATE_COLUMNS.map((column) => column.canonical);
+    const products = __getProductRecords().slice(0, TEMPLATE_ROW_LIMIT);
+    const rows = products.length > 0
+        ? products.map((record) => canonicalColumns.map((column) => formatProductTemplateValue(record, column)))
+        : [canonicalColumns.map((column) => DEFAULT_PRODUCT_TEMPLATE_SAMPLE[column] ?? '')];
+    rows.push(headers.map(() => ''));
+    return { headers, rows };
+}
+function buildTemplate(type) {
+    switch (type) {
+        case 'products':
+            return buildProductTemplate();
+        case 'initial_stock': {
+            const headers = getCsvHeaders('initial_stock');
+            const row = headers.map((column) => DEFAULT_INITIAL_STOCK_SAMPLE[column] ?? '');
+            return { headers, rows: [row] };
+        }
+        case 'movements': {
+            const headers = getCsvHeaders('movements');
+            const row = headers.map((column) => DEFAULT_MOVEMENT_TEMPLATE_SAMPLE[column] ?? '');
+            return { headers, rows: [row] };
+        }
+        default:
+            return { headers: [], rows: [] };
+    }
+}
+function buildErrorCsv(job) {
+    const headers = ['rowNumber', 'messages', ...job.columns];
+    const rows = job.errors.map((row) => {
+        const message = (row.messages ?? []).join('; ');
+        return [String(row.lineNumber), message, ...job.columns.map((column) => row.raw[column] ?? '')];
+    });
+    return stringifyCsv(headers, rows);
+}
+export default async function csvRoutes(server) {
+    server.post('/upload', async (request, reply) => {
+        const { type: typeQuery } = request.query;
+        const rawType = typeof typeQuery === 'string' ? typeQuery.trim() : '';
+        let requestedType;
+        const autoDetect = !rawType || sanitizeHeader(rawType) === 'auto';
+        if (!autoDetect) {
+            requestedType = requireCsvType(rawType);
+        }
+        const body = (request.body ?? {});
+        if (body.stage === 'commit') {
+            const { previewId } = body;
+            if (!previewId || !previewCache.has(previewId)) {
+                return reply.code(400).send({ error: '유효하지 않은 previewId 입니다.' });
+            }
+            const entry = previewCache.get(previewId);
+            previewCache.delete(previewId);
+            if (requestedType && entry.type !== requestedType) {
+                return reply.code(400).send({ error: '요청한 type과 미리보기 유형이 일치하지 않습니다.' });
+            }
+            const jobId = randomUUID();
+            const errorRows = entry.rows.filter((row) => row.action === 'error');
+            const job = {
+                id: jobId,
+                type: entry.type,
+                status: 'pending',
+                total: entry.rows.length,
+                processed: 0,
+                summary: entry.summary,
+                columns: entry.columns,
+                rows: entry.rows,
+                errors: [...errorRows],
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+            };
+            queueJob(job);
+            return reply.send({
+                job: {
+                    id: job.id,
+                    status: job.status,
+                    total: job.total,
+                    processed: job.processed,
+                    summary: job.summary,
+                    errorCount: job.errors.length,
+                    createdAt: job.createdAt,
+                },
+            });
+        }
+        const csvText = typeof body.content === 'string' ? body.content : '';
+        if (!csvText.trim()) {
+            return reply.code(400).send({ error: '업로드할 CSV 내용이 비어있습니다.' });
+        }
+        const table = parseCsv(csvText);
+        if (table.length === 0) {
+            return reply.code(400).send({ error: '유효한 CSV 데이터를 찾을 수 없습니다.' });
+        }
+        const [headerRow, ...dataRows] = table;
+        const headerResolution = resolveCsvHeaders(headerRow, autoDetect ? undefined : requestedType);
+        if (headerResolution.missingRequired.length > 0) {
+            return reply.code(400).send({
+                error: 'CSV 헤더가 누락되었습니다.',
+                details: headerResolution.missingRequired.map((column) => `${column} 필드는 필수입니다.`),
+            });
+        }
+        const type = headerResolution.type;
+        const columns = headerResolution.canonicalColumns;
+        if (type === 'products') {
+            seedInitialStock(__getProductRecords());
+        }
+        const parsedRows = analyzeRows(type, columns, dataRows);
+        const summary = summarizeRows(parsedRows);
+        const previewId = randomUUID();
+        const entry = {
+            id: previewId,
+            type,
+            columns,
+            originalColumns: headerRow,
+            columnMappings: headerResolution.columnMappings,
+            warnings: headerResolution.warnings,
+            rows: parsedRows,
+            summary,
+            createdAt: Date.now(),
+        };
+        previewCache.set(previewId, entry);
+        return reply.send({
+            previewId,
+            type,
+            columns,
+            summary,
+            errors: parsedRows
+                .filter((row) => row.action === 'error')
+                .slice(0, 20)
+                .map((row) => ({
+                rowNumber: row.lineNumber,
+                messages: row.messages ?? [],
+            })),
+        });
+    });
+    server.get('/jobs/:id', async (request, reply) => {
+        const { id } = request.params;
+        const job = jobStore.get(id);
+        if (!job) {
+            return reply.code(404).send({ error: '요청한 작업을 찾을 수 없습니다.' });
+        }
+        return reply.send({
+            job: {
+                id: job.id,
+                status: job.status,
+                total: job.total,
+                processed: job.processed,
+                summary: job.summary,
+                errorCount: job.errors.length,
+                createdAt: job.createdAt,
+                updatedAt: job.updatedAt,
+            },
+        });
+    });
+    server.get('/jobs/:id/errors', async (request, reply) => {
+        const { id } = request.params;
+        const job = jobStore.get(id);
+        if (!job) {
+            return reply.code(404).send({ error: '요청한 작업을 찾을 수 없습니다.' });
+        }
+        if (job.errors.length === 0) {
+            return reply.code(204).send();
+        }
+        const csv = buildErrorCsv(job);
+        reply.header('content-type', 'text/csv; charset=utf-8');
+        reply.header('content-disposition', `attachment; filename="${job.type}-errors-${job.id}.csv"`);
+        return reply.send(csv);
+    });
+    server.get('/template', async (request, reply) => {
+        const { type: typeQuery } = request.query;
+        const type = requireCsvType(typeQuery);
+        const template = buildTemplate(type);
+        const csv = stringifyCsv(template.headers, template.rows);
+        reply.header('content-type', 'text/csv; charset=utf-8');
+        reply.header('content-disposition', `attachment; filename="${type}-template.csv"`);
+        return reply.send(csv);
+    });
+}

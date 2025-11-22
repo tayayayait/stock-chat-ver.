@@ -1,0 +1,1236 @@
+﻿import * as React from 'react';
+
+import { DEFAULT_UNIT, DEFAULT_UNIT_OPTIONS, type Product } from '../../../domains/products';
+import { fetchProducts } from '../../../services/products';
+import { type Partner } from '../../../services/orders';
+import type { OrdersWarehouse } from './types';
+import { useToast } from '../../../components/Toaster';
+import SelectDropdown from '../../../components/common/SelectDropdown';
+import type { ComboboxOption } from '../../../components/common/Combobox';
+import {
+  describeKstTodayWindow,
+  detectTimePickerUiMode,
+  ensureDateTimeLocalPrecision,
+  formatDateTimeLocalFromUtc,
+  formatKstDateTimeLabelFromLocal,
+  formatUtcDateTimeLabelFromLocal,
+  isKstDateTimeLocalWithinBounds,
+  parseKstDateTimeLocal,
+  type DeviceUiMode,
+} from '@/shared/datetime/kst';
+
+type OrderItemDraft = {
+  productId: string | null;
+  sku: string;
+  productName: string;
+  searchTerm: string;
+  qty: string;
+  unit: string;
+};
+
+export type OrderKind = 'purchase' | 'sales';
+
+export interface NewOrderFormState {
+  orderKind: OrderKind;
+  partnerId: string;
+  memo: string;
+  items: OrderItemDraft[];
+  warehouseId: string | null;
+  warehouseCode: string | null;
+  scheduledAt: string;
+}
+
+export interface NewOrderFormProps {
+  defaultKind: OrderKind;
+  partners: Partner[];
+  warehouses: OrdersWarehouse[];
+  products?: Product[];
+  productLoadError?: string | null;
+  onReloadProducts?: () => Promise<Product[]>;
+  onResetProductLoadError?: () => void;
+  onSubmit: (form: NewOrderFormState) => Promise<void>;
+  onSubmitSuccess?: (helpers: { resetForm: () => void }) => void;
+  onRequestCreatePartner?: (kind: OrderKind) => void;
+  onRequestManageWarehouse?: () => void;
+  onCancel?: () => void;
+  onKindChange?: (kind: OrderKind) => void;
+  className?: string;
+  active?: boolean;
+  submitButtonLabel?: string;
+  cancelButtonLabel?: string;
+  formId?: string;
+  'aria-labelledby'?: string;
+  canSelectWarehouse?: boolean;
+  canManageWarehouse?: boolean;
+  showKindSwitcher?: boolean;
+}
+
+const buildInitialItem = (): OrderItemDraft => ({
+  productId: null,
+  sku: '',
+  productName: '',
+  searchTerm: '',
+  qty: '',
+  unit: DEFAULT_UNIT,
+});
+
+const LAST_SELECTION_STORAGE_KEY = 'orders:lastWarehouseSelection';
+const MINUTE_IN_MS = 60 * 1000;
+const FUTURE_SCHEDULE_ERROR = '미래 시점의 입출고는 등록할 수 없습니다.';
+
+const filterActivePartners = (partners: Partner[]) => partners.filter((partner) => partner.isActive !== false);
+
+const buildPartnerOptions = (partners: Partner[], kind: OrderKind): Partner[] => {
+  const activePartners = filterActivePartners(partners);
+  if (kind === 'purchase') {
+    return activePartners.filter((partner) => partner.type === 'SUPPLIER');
+  }
+
+  const customers = activePartners.filter((partner) => partner.type === 'CUSTOMER');
+  if (customers.length > 0) {
+    return customers;
+  }
+
+  const suppliers = activePartners.filter((partner) => partner.type === 'SUPPLIER');
+  if (suppliers.length > 0) {
+    return suppliers;
+  }
+
+  return activePartners;
+};
+
+const resolveDefaultPartnerId = (partners: Partner[], kind: OrderKind) => buildPartnerOptions(partners, kind)[0]?.id ?? '';
+
+const normalizeIdentifier = (value?: string | null): string | null => {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  return trimmed.toUpperCase();
+};
+
+const getInventoryStatsForSelection = (
+  product: Product | null,
+  warehouseCode?: string | null,
+): { warehouseQuantity: number | null } => {
+  const normalizedWarehouse = normalizeIdentifier(warehouseCode);
+  if (!product || !normalizedWarehouse) {
+    return { warehouseQuantity: null };
+  }
+  let warehouseQuantity = 0;
+  let hasWarehouseEntry = false;
+  (product.inventory ?? []).forEach((entry) => {
+    const entryWarehouse = normalizeIdentifier(entry?.warehouseCode);
+    if (!entryWarehouse || entryWarehouse !== normalizedWarehouse) {
+      return;
+    }
+    hasWarehouseEntry = true;
+    const onHand = Math.max(0, Number(entry?.onHand ?? 0));
+    warehouseQuantity += onHand;
+  });
+  return {
+    warehouseQuantity: hasWarehouseEntry ? warehouseQuantity : 0,
+  };
+};
+
+const NewOrderForm: React.FC<NewOrderFormProps> = ({
+  defaultKind,
+  partners,
+  warehouses,
+  products,
+  productLoadError,
+  onReloadProducts,
+  onResetProductLoadError,
+  onSubmit,
+  onSubmitSuccess,
+  onRequestCreatePartner,
+  onRequestManageWarehouse,
+  onCancel,
+  onKindChange,
+  className,
+  active = true,
+  submitButtonLabel = '저장',
+  cancelButtonLabel = '취소',
+  formId,
+  'aria-labelledby': ariaLabelledBy,
+  canSelectWarehouse = true,
+  canManageWarehouse = true,
+  showKindSwitcher = true,
+}) => {
+  const showToast = useToast();
+  const resolvePartnerId = React.useCallback((kind: OrderKind) => resolveDefaultPartnerId(partners, kind), [partners]);
+
+  const [productOptions, setProductOptions] = React.useState<Product[]>(products ?? []);
+  const [loadingProducts, setLoadingProducts] = React.useState(false);
+  const [productFetchError, setProductFetchError] = React.useState<string | null>(null);
+  const isFetchingProductsRef = React.useRef(false);
+  const productCacheRef = React.useRef<Product[]>(products ?? []);
+  const hasLoadedProductsRef = React.useRef(products !== undefined);
+  const isMountedRef = React.useRef(true);
+  const [hideZeroWarehouseStock, setHideZeroWarehouseStock] = React.useState(false);
+  const [timePickerMode, setTimePickerMode] = React.useState<DeviceUiMode>(() => detectTimePickerUiMode());
+  const [salesWindow, setSalesWindow] = React.useState(() => describeKstTodayWindow());
+  const [currentKstLocal, setCurrentKstLocal] = React.useState(() => formatDateTimeLocalFromUtc(Date.now()));
+  const scheduledAtHelperTextId = React.useId();
+  const scheduledAtPreviewId = React.useId();
+  const scheduledAtErrorId = React.useId();
+
+  const createInitialState = React.useCallback(
+    (kind: OrderKind = defaultKind): NewOrderFormState => ({
+      orderKind: kind,
+      partnerId: resolvePartnerId(kind),
+      memo: '',
+      items: [buildInitialItem()],
+      warehouseId: null,
+      warehouseCode: null,
+      scheduledAt: '',
+    }),
+    [defaultKind, resolvePartnerId],
+  );
+  React.useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return;
+    }
+    const media = window.matchMedia('(pointer: coarse)');
+    const updateMode = () => setTimePickerMode(media.matches ? 'dial' : 'spinner');
+    updateMode();
+    if (typeof media.addEventListener === 'function') {
+      media.addEventListener('change', updateMode);
+      return () => media.removeEventListener('change', updateMode);
+    }
+    if (typeof media.addListener === 'function') {
+      media.addListener(updateMode);
+      return () => media.removeListener(updateMode);
+    }
+    return undefined;
+  }, []);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const updateWindows = () => {
+      setSalesWindow(describeKstTodayWindow());
+      setCurrentKstLocal(formatDateTimeLocalFromUtc(Date.now()));
+    };
+    updateWindows();
+    const intervalId = window.setInterval(updateWindows, 30 * 1000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  const applyProductOptions = React.useCallback(
+    (items: Product[]) => {
+      productCacheRef.current = items;
+      if (!isMountedRef.current) {
+        return;
+      }
+      setProductOptions(items);
+      hasLoadedProductsRef.current = true;
+      setProductFetchError(null);
+    },
+    [],
+  );
+
+  const fetchAndStoreProducts = React.useCallback(async () => {
+    if (!isMountedRef.current) {
+      return [] as Product[];
+    }
+    if (isFetchingProductsRef.current) {
+      return productCacheRef.current;
+    }
+    isFetchingProductsRef.current = true;
+    setLoadingProducts(true);
+    setProductFetchError(null);
+    onResetProductLoadError?.();
+    try {
+      const items = await (onReloadProducts ? onReloadProducts() : fetchProducts());
+      applyProductOptions(items);
+      return items;
+    } catch (err) {
+      console.error('[orders] Failed to load products for new order form', err);
+      if (isMountedRef.current) {
+        setProductFetchError('상품 정보를 불러오지 못했습니다. 다시 시도해주세요.');
+      }
+      throw err;
+    } finally {
+      isFetchingProductsRef.current = false;
+      hasLoadedProductsRef.current = true;
+      if (isMountedRef.current) {
+        setLoadingProducts(false);
+      }
+    }
+  }, [applyProductOptions, onReloadProducts, onResetProductLoadError]);
+
+  React.useEffect(() => {
+    if (products === undefined) {
+      return;
+    }
+    applyProductOptions(products);
+    hasLoadedProductsRef.current = true;
+    if (isMountedRef.current) {
+      setLoadingProducts(false);
+    }
+    isFetchingProductsRef.current = false;
+  }, [applyProductOptions, products]);
+
+  const [formState, setFormState] = React.useState<NewOrderFormState>(() => createInitialState());
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const hasWarehouseSelection = Boolean(formState.warehouseCode?.trim());
+  const warehouseInventoryBySku = React.useMemo(() => {
+    const entries = new Map<string, { warehouseQuantity: number | null }>();
+    productOptions.forEach((product) => {
+      entries.set(product.sku, getInventoryStatsForSelection(product, formState.warehouseCode));
+    });
+    return entries;
+  }, [productOptions, formState.warehouseCode]);
+  const computeStatsForProduct = React.useCallback(
+    (product: Product | null): { warehouseQuantity: number | null } => {
+      if (!product) {
+        return { warehouseQuantity: null };
+      }
+      const cached = warehouseInventoryBySku.get(product.sku);
+      if (cached) {
+        return cached;
+      }
+      return getInventoryStatsForSelection(product, formState.warehouseCode);
+    },
+    [formState.warehouseCode, warehouseInventoryBySku],
+  );
+  const hasPositiveStockForScope = React.useMemo(() => {
+    for (const stats of warehouseInventoryBySku.values()) {
+      if ((stats?.warehouseQuantity ?? 0) > 0) {
+        return true;
+      }
+    }
+    return false;
+  }, [warehouseInventoryBySku]);
+
+
+  React.useEffect(() => {
+    if (!hasWarehouseSelection && hideZeroWarehouseStock) {
+      setHideZeroWarehouseStock(false);
+    }
+  }, [hasWarehouseSelection, hideZeroWarehouseStock]);
+  const partnerOptions = React.useMemo(
+    () => buildPartnerOptions(partners, formState.orderKind),
+    [partners, formState.orderKind],
+  );
+  const partnerDropdownOptions = React.useMemo<ComboboxOption[]>(
+    () => partnerOptions.map((partner) => ({ label: partner.name, value: partner.id })),
+    [partnerOptions],
+  );
+  const warehouseDropdownOptions = React.useMemo<ComboboxOption[]>(
+    () => warehouses.map((warehouse) => ({ label: warehouse.name ?? warehouse.code, value: warehouse.code })),
+    [warehouses],
+  );
+
+  const resetFormState = React.useCallback(() => {
+    setFormState(createInitialState());
+    setError(null);
+  }, [createInitialState]);
+
+  const unitOptions = React.useMemo(() => {
+    const units = new Set<string>(DEFAULT_UNIT_OPTIONS);
+    productOptions.forEach((product) => {
+      if (product.unit) {
+        units.add(product.unit);
+      }
+    });
+    formState.items.forEach((item) => {
+      if (item.unit) {
+        units.add(item.unit);
+      }
+    });
+    return Array.from(units);
+  }, [formState.items, productOptions]);
+  const unitDropdownOptions = React.useMemo<ComboboxOption[]>(
+    () => unitOptions.map((unit) => ({ label: unit, value: unit })),
+    [unitOptions],
+  );
+
+  React.useEffect(() => {
+    setFormState((prev) => ({
+      ...prev,
+      orderKind: defaultKind,
+      partnerId: resolvePartnerId(defaultKind),
+    }));
+  }, [defaultKind, resolvePartnerId]);
+
+  React.useEffect(() => {
+    if (!active) {
+      return;
+    }
+
+    if (products === undefined && productOptions.length === 0 && productCacheRef.current.length > 0) {
+      setProductOptions(productCacheRef.current);
+    }
+
+    const requestActive = isFetchingProductsRef.current;
+
+    if (products !== undefined || hasLoadedProductsRef.current || requestActive) {
+      return;
+    }
+
+    void fetchAndStoreProducts().catch(() => undefined);
+  }, [active, fetchAndStoreProducts, productOptions.length, products]);
+
+  React.useEffect(() => {
+    if (active) {
+      return;
+    }
+    setProductFetchError(null);
+    isFetchingProductsRef.current = false;
+  }, [active]);
+
+  React.useEffect(() => {
+    if (productLoadError !== undefined) {
+      setProductFetchError(productLoadError);
+    }
+  }, [productLoadError]);
+
+  const clampScheduledValue = React.useCallback(
+    (value: string, kind: OrderKind): string => {
+      if (!value) {
+        return value;
+      }
+      const utcMs = parseKstDateTimeLocal(value);
+      if (utcMs === null) {
+        return value;
+      }
+      const nowUtcMs = Date.now();
+      let nextUtcMs = utcMs;
+      if (nextUtcMs > nowUtcMs) {
+        nextUtcMs = nowUtcMs;
+      }
+      if (kind === 'sales') {
+        const { bounds } = salesWindow;
+        if (bounds) {
+          if (nextUtcMs < bounds.startUtcMs) {
+            nextUtcMs = bounds.startUtcMs;
+          }
+          if (nextUtcMs > bounds.endUtcMs) {
+            nextUtcMs = Math.min(nextUtcMs, bounds.endUtcMs);
+          }
+        }
+      }
+      if (nextUtcMs === utcMs) {
+        return value;
+      }
+      return formatDateTimeLocalFromUtc(nextUtcMs);
+    },
+    [salesWindow],
+  );
+
+  const isSalesOrder = formState.orderKind === 'sales';
+  const salesBounds = isSalesOrder ? salesWindow.bounds : null;
+  const scheduleMin = salesBounds ? formatDateTimeLocalFromUtc(salesBounds.startUtcMs) || undefined : undefined;
+  const salesMaxCandidate = salesBounds ? formatDateTimeLocalFromUtc(salesBounds.endUtcMs) || undefined : undefined;
+  const nowLimit = currentKstLocal?.trim() ? currentKstLocal : undefined;
+  const scheduleMax =
+    salesMaxCandidate && nowLimit
+      ? salesMaxCandidate < nowLimit
+        ? salesMaxCandidate
+        : nowLimit
+      : salesMaxCandidate ?? nowLimit;
+  const salesWindowLabel = salesWindow.label;
+
+  const handleScheduledAtChange = React.useCallback(
+    (value: string) => {
+      setFormState((prev) => {
+        const normalizedValue = value ? ensureDateTimeLocalPrecision(value) : '';
+        return { ...prev, scheduledAt: normalizedValue };
+      });
+      setError(null);
+    },
+    [],
+  );
+
+  const adjustScheduledAtByMinutes = React.useCallback(
+    (minutes: number) => {
+      setFormState((prev) => {
+        if (!prev.scheduledAt) {
+          return prev;
+        }
+        const utcMs = parseKstDateTimeLocal(prev.scheduledAt);
+        if (utcMs === null) {
+          return prev;
+        }
+        const nextValue = formatDateTimeLocalFromUtc(utcMs + minutes * MINUTE_IN_MS);
+        if (!nextValue) {
+          return prev;
+        }
+        const clamped = clampScheduledValue(nextValue, prev.orderKind);
+        if (clamped === prev.scheduledAt) {
+          return prev;
+        }
+        return { ...prev, scheduledAt: clamped };
+      });
+      setError(null);
+    },
+    [clampScheduledValue],
+  );
+
+  const handleScheduledAtKeyDown = React.useCallback(
+    (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        handleScheduledAtChange('');
+        return;
+      }
+      if (!formState.scheduledAt) {
+        return;
+      }
+      if (event.key === 'PageUp') {
+        event.preventDefault();
+        adjustScheduledAtByMinutes(60);
+        return;
+      }
+      if (event.key === 'PageDown') {
+        event.preventDefault();
+        adjustScheduledAtByMinutes(-60);
+        return;
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        adjustScheduledAtByMinutes(1);
+        return;
+      }
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        adjustScheduledAtByMinutes(-1);
+        return;
+      }
+      if (event.key === 'Home' && scheduleMin) {
+        event.preventDefault();
+        handleScheduledAtChange(scheduleMin);
+      }
+      if (event.key === 'End' && scheduleMax) {
+        event.preventDefault();
+        handleScheduledAtChange(scheduleMax);
+      }
+    },
+    [adjustScheduledAtByMinutes, formState.scheduledAt, handleScheduledAtChange, scheduleMax, scheduleMin],
+  );
+
+  const handleRetryProducts = React.useCallback(() => {
+    if (isFetchingProductsRef.current) {
+      return;
+    }
+    onResetProductLoadError?.();
+    void fetchAndStoreProducts().catch(() => undefined);
+  }, [fetchAndStoreProducts, onResetProductLoadError]);
+
+  React.useEffect(() => {
+    setFormState((prev) => {
+      if (partnerOptions.some((partner) => partner.id === prev.partnerId)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        partnerId: resolvePartnerId(prev.orderKind),
+      };
+    });
+  }, [partnerOptions, resolvePartnerId]);
+
+  const handleChangeKind = React.useCallback(
+    (kind: OrderKind) => {
+      setFormState((prev) => ({
+        ...prev,
+        orderKind: kind,
+        partnerId: resolvePartnerId(kind),
+        scheduledAt: prev.scheduledAt ? clampScheduledValue(prev.scheduledAt, kind) : '',
+      }));
+      onKindChange?.(kind);
+    },
+    [clampScheduledValue, onKindChange, resolvePartnerId],
+  );
+
+  const handleChangeItem = React.useCallback((index: number, patch: Partial<OrderItemDraft>) => {
+    setFormState((prev) => {
+      const nextItems = prev.items.map((item, itemIndex) => (itemIndex === index ? { ...item, ...patch } : item));
+      return { ...prev, items: nextItems };
+    });
+  }, []);
+
+  const handleAddItem = React.useCallback(() => {
+    setFormState((prev) => ({ ...prev, items: [...prev.items, buildInitialItem()] }));
+  }, []);
+
+  const handleRemoveItem = React.useCallback((index: number) => {
+    setFormState((prev) => ({
+      ...prev,
+      items: prev.items.length > 1 ? prev.items.filter((_, itemIndex) => itemIndex !== index) : prev.items,
+    }));
+  }, []);
+
+
+  const handlePersistSelection = React.useCallback(
+    (selection: { warehouseId: string | null; warehouseCode: string | null } | null) => {
+      try {
+        if (!selection) {
+          window.localStorage.removeItem(LAST_SELECTION_STORAGE_KEY);
+          return;
+        }
+        window.localStorage.setItem(
+          LAST_SELECTION_STORAGE_KEY,
+          JSON.stringify({
+            warehouseId: selection.warehouseId,
+            warehouseCode: selection.warehouseCode,
+          }),
+        );
+      } catch (storageError) {
+        console.error('[orders] Failed to persist warehouse selection', storageError);
+      }
+    },
+    [],
+  );
+
+  const handleClearWarehouseSelection = React.useCallback(() => {
+    setFormState((prev) => ({
+      ...prev,
+      warehouseId: null,
+      warehouseCode: null,
+    }));
+    handlePersistSelection(null);
+    setError(null);
+  }, [handlePersistSelection]);
+
+  const handleSelectWarehouse = React.useCallback(
+    (value: string) => {
+      const selected = value.trim();
+      if (!selected) {
+        handleClearWarehouseSelection();
+        return;
+      }
+      const warehouse =
+        warehouses.find((entry) => entry.code === selected || entry.id === selected) ?? null;
+      const warehouseId = warehouse?.id ?? null;
+      const warehouseCode = warehouse?.code ?? selected;
+      setFormState((prev) => ({
+        ...prev,
+        warehouseId,
+        warehouseCode,
+      }));
+      handlePersistSelection({ warehouseId, warehouseCode });
+      setError(null);
+    },
+    [handleClearWarehouseSelection, handlePersistSelection, warehouses],
+  );
+
+  React.useEffect(() => {
+    if (warehouses.length === 0) {
+      return;
+    }
+    try {
+      const stored = window.localStorage.getItem(LAST_SELECTION_STORAGE_KEY);
+      if (!stored) {
+        return;
+      }
+      const parsed = JSON.parse(stored) as { warehouseId?: string; warehouseCode?: string };
+      if (!parsed?.warehouseCode) {
+        return;
+      }
+      const warehouse =
+        warehouses.find((entry) => entry.code === parsed.warehouseCode || entry.id === parsed.warehouseId) ?? null;
+      const warehouseId = warehouse?.id ?? parsed.warehouseId ?? null;
+      const warehouseCode = warehouse?.code ?? parsed.warehouseCode;
+      setFormState((prev) => ({
+        ...prev,
+        warehouseId,
+        warehouseCode,
+      }));
+    } catch (restoreError) {
+      console.error('[orders] Failed to restore warehouse selection', restoreError);
+    }
+  }, [warehouses]);
+
+  const resolvedWarehouseRecord = React.useMemo(() => {
+    if (!formState.warehouseId && !formState.warehouseCode) {
+      return null;
+    }
+    return (
+      warehouses.find(
+        (entry) =>
+          (formState.warehouseId && entry.id === formState.warehouseId) ||
+          (formState.warehouseCode && entry.code === formState.warehouseCode),
+      ) ?? null
+    );
+  }, [formState.warehouseCode, formState.warehouseId, warehouses]);
+
+  const resolvedWarehouseCode = resolvedWarehouseRecord?.code ?? formState.warehouseCode ?? null;
+
+  const isFutureScheduledValue = React.useCallback((value: string): boolean => {
+    const utcMs = parseKstDateTimeLocal(value);
+    if (utcMs === null) {
+      return false;
+    }
+    return utcMs > Date.now();
+  }, []);
+
+  const scheduleHelperText = React.useMemo(() => {
+    const baseText =
+      '방향키·PageUp/PageDown·Enter 키로 날짜와 시간을 조정하고 Esc로 초기화할 수 있습니다. 모든 시간은 KST(UTC+9) 기준으로 입력되며 현재 시점 이후의 미래 시간은 선택할 수 없습니다.';
+    if (!isSalesOrder) {
+      return baseText;
+    }
+    return `${baseText} 출고 주문은 ${salesWindowLabel} 범위 내에서만 선택 가능합니다.`;
+  }, [isSalesOrder, salesWindowLabel]);
+
+  const scheduleValidationMessage = React.useMemo(() => {
+    if (!formState.scheduledAt) {
+      return null;
+    }
+    if (parseKstDateTimeLocal(formState.scheduledAt) === null) {
+      return '유효한 날짜와 시간을 입력해주세요.';
+    }
+    if (isFutureScheduledValue(formState.scheduledAt)) {
+      return FUTURE_SCHEDULE_ERROR;
+    }
+    if (isSalesOrder && salesBounds && !isKstDateTimeLocalWithinBounds(formState.scheduledAt, salesBounds)) {
+      return `출고 주문은 ${salesWindowLabel} 범위 내에서만 선택 가능합니다.`;
+    }
+    return null;
+  }, [formState.scheduledAt, isFutureScheduledValue, isSalesOrder, salesBounds, salesWindowLabel]);
+
+  const schedulePreviewText = React.useMemo(() => {
+    if (!formState.scheduledAt) {
+      return '날짜와 시간을 선택하면 KST와 UTC 기준 값을 바로 확인할 수 있습니다.';
+    }
+    const kstLabel = formatKstDateTimeLabelFromLocal(formState.scheduledAt);
+    const utcLabel = formatUtcDateTimeLabelFromLocal(formState.scheduledAt);
+    if (!kstLabel || !utcLabel) {
+      return '유효한 날짜와 시간을 입력해주세요.';
+    }
+    return `${kstLabel} · ${utcLabel}`;
+  }, [formState.scheduledAt]);
+
+  const scheduledAtDescribedBy = React.useMemo(() => {
+    const ids = [scheduledAtHelperTextId, scheduledAtPreviewId];
+    if (scheduleValidationMessage) {
+      ids.push(scheduledAtErrorId);
+    }
+    return ids.join(' ');
+  }, [scheduleValidationMessage, scheduledAtErrorId, scheduledAtHelperTextId, scheduledAtPreviewId]);
+
+  const handleSubmit = React.useCallback(
+    async (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      setSubmitting(true);
+      setError(null);
+      try {
+        if (!formState.scheduledAt) {
+          setError(formState.orderKind === 'purchase' ? '입고일을 선택해주세요.' : '출고일을 선택해주세요.');
+          return;
+        }
+        const scheduledAtUtcMs = parseKstDateTimeLocal(formState.scheduledAt);
+        if (scheduledAtUtcMs === null) {
+          setError('유효한 날짜와 시간을 입력해주세요.');
+          return;
+        }
+        if (scheduledAtUtcMs > Date.now()) {
+          setError(FUTURE_SCHEDULE_ERROR);
+          return;
+        }
+        if (
+          formState.orderKind === 'sales' &&
+          salesBounds &&
+          !isKstDateTimeLocalWithinBounds(formState.scheduledAt, salesBounds)
+        ) {
+          setError(`출고 주문은 ${salesWindowLabel} 범위 내에서만 선택 가능합니다.`);
+          return;
+        }
+        if (!formState.partnerId || !partnerOptions.some((partner) => partner.id === formState.partnerId)) {
+          setError('거래처를 선택해주세요.');
+          return;
+        }
+      const cleanedItems = formState.items.map((item) => {
+        const numericQty = Number(item.qty);
+        return {
+          sku: item.sku.trim(),
+          qty: Number.isFinite(numericQty) ? numericQty : 0,
+          unit: item.unit.trim() || 'EA',
+        };
+      });
+        if (cleanedItems.some((item) => !item.sku)) {
+          setError('모든 품목에 상품을 선택해주세요.');
+          return;
+        }
+        const validItems = cleanedItems.filter((item) => item.qty > 0);
+        if (validItems.length === 0) {
+          setError('거래처와 품목 정보를 입력해주세요.');
+          return;
+        }
+        if (!formState.warehouseId || !formState.warehouseCode) {
+          setError('창고를 선택해주세요.');
+          return;
+        }
+        await onSubmit({
+          orderKind: formState.orderKind,
+          partnerId: formState.partnerId,
+          memo: formState.memo.trim(),
+          items: validItems,
+          warehouseId: formState.warehouseId,
+          warehouseCode: formState.warehouseCode,
+          scheduledAt: formState.scheduledAt,
+        });
+        onSubmitSuccess?.({ resetForm: resetFormState });
+      } catch (err) {
+        console.error('[orders] NewOrderForm submit failed', err);
+        const status =
+          typeof err === 'object' && err !== null && 'status' in err
+            ? (err as { status?: unknown }).status
+            : undefined;
+        const normalizedStatus = typeof status === 'number' ? status : undefined;
+        const isNetworkOrServerError =
+          normalizedStatus === 0 || (normalizedStatus !== undefined && normalizedStatus >= 500);
+        if (err instanceof Error && err.message && !isNetworkOrServerError) {
+          setError(err.message);
+        } else {
+          const toastMessage =
+            formState.orderKind === 'purchase' ? '입고 처리에 실패했습니다.' : '출고 처리에 실패했습니다.';
+          showToast(toastMessage, { tone: 'error' });
+        }
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [
+      formState,
+      onSubmit,
+      onSubmitSuccess,
+      partnerOptions,
+      resetFormState,
+      salesBounds,
+      salesWindowLabel,
+      showToast,
+    ],
+  );
+
+  return (
+    <form
+      id={formId}
+      aria-labelledby={ariaLabelledBy}
+      onSubmit={handleSubmit}
+      className={`space-y-4 text-sm ${className ?? ''}`.trim()}
+    >
+      {showKindSwitcher ? (
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className={`rounded-md px-3 py-1.5 font-semibold ${
+              formState.orderKind === 'purchase' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'
+            }`}
+            onClick={() => handleChangeKind('purchase')}
+          >
+            입고 주문서
+          </button>
+          <button
+            type="button"
+            className={`rounded-md px-3 py-1.5 font-semibold ${
+              formState.orderKind === 'sales' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600'
+            }`}
+            onClick={() => handleChangeKind('sales')}
+          >
+            출고 주문서
+          </button>
+        </div>
+      ) : null}
+      <div>
+        <div className="mb-1 flex items-center justify-between">
+          <label className="block text-xs font-semibold text-slate-500" htmlFor="partner">
+            거래처
+          </label>
+          {onRequestCreatePartner ? (
+            <button
+              type="button"
+              className="text-xs font-semibold text-blue-600"
+              onClick={() => onRequestCreatePartner(formState.orderKind)}
+            >
+              거래처 추가
+            </button>
+          ) : null}
+        </div>
+        <SelectDropdown
+          id="partner"
+          className="mt-1"
+          value={formState.partnerId}
+          onChange={(next) => {
+            setFormState((prev) => ({ ...prev, partnerId: next }));
+            setError(null);
+          }}
+          options={partnerDropdownOptions}
+          placeholder="거래처 선택"
+          emptyMessage="거래처를 선택하세요"
+          inputClassName="w-full rounded-md border border-slate-200 px-3 py-2"
+        />
+      </div>
+
+      <div>
+        <div className="mb-1 flex items-center justify-between">
+          <label className="block text-xs font-semibold text-slate-500" htmlFor="warehouse">
+            창고
+          </label>
+          {onRequestManageWarehouse ? (
+            <button
+              type="button"
+              onClick={onRequestManageWarehouse}
+              className="text-xs font-semibold text-blue-600 disabled:cursor-not-allowed disabled:text-slate-300"
+              disabled={!canManageWarehouse}
+            >
+              창고 추가
+            </button>
+          ) : null}
+        </div>
+        <SelectDropdown
+          id="warehouse"
+          className="mt-1"
+          value={formState.warehouseCode ?? ''}
+          onChange={(next) => handleSelectWarehouse(next)}
+          disabled={!canSelectWarehouse}
+          options={warehouseDropdownOptions}
+          placeholder="창고 선택"
+          emptyMessage="창고를 선택하세요"
+          inputClassName="w-full rounded-md border border-slate-200 px-3 py-2"
+        />
+        {!canSelectWarehouse ? (
+          <p className="mt-1 text-xs text-slate-400">창고 선택 권한이 없습니다.</p>
+        ) : null}
+      </div>
+
+      <div>
+        <div className="mb-1 flex items-center justify-between">
+          <label className="block text-xs font-semibold text-slate-500" htmlFor="scheduledAt">
+            {formState.orderKind === 'purchase' ? '입고일' : '출고일'}
+          </label>
+          <span className="sr-only">KST · UTC 저장</span>
+        </div>
+        <input
+          id="scheduledAt"
+          type="datetime-local"
+          className="w-full rounded-md border border-slate-200 px-3 py-2"
+          value={formState.scheduledAt}
+          onChange={(event) => handleScheduledAtChange(event.target.value)}
+          onKeyDown={handleScheduledAtKeyDown}
+          step={60}
+          min={scheduleMin}
+          max={scheduleMax}
+          aria-describedby={scheduledAtDescribedBy}
+          aria-errormessage={scheduleValidationMessage ? scheduledAtErrorId : undefined}
+          aria-invalid={scheduleValidationMessage ? true : undefined}
+          data-time-ui-mode={timePickerMode}
+          inputMode={timePickerMode === 'dial' ? 'numeric' : 'text'}
+          title={
+            timePickerMode === 'dial'
+              ? '현재 장치는 다이얼형 시간 선택 UI를 기본으로 사용합니다.'
+              : '현재 장치는 숫자형 스크롤 시간 선택 UI를 기본으로 사용합니다.'
+          }
+        />
+        <p id={scheduledAtHelperTextId} className="sr-only">
+          {scheduleHelperText}
+        </p>
+        <div
+          id={scheduledAtPreviewId}
+          role="status"
+          aria-live="polite"
+          className="sr-only"
+        >
+          미리보기: {schedulePreviewText}
+        </div>
+        {scheduleValidationMessage ? (
+          <p id={scheduledAtErrorId} role="alert" className="mt-1 text-xs font-semibold text-rose-600">
+            {scheduleValidationMessage}
+          </p>
+        ) : null}
+      </div>
+
+      <div>
+        <label className="mb-1 block text-xs font-semibold text-slate-500" htmlFor="memo">
+          메모
+        </label>
+        <textarea
+          id="memo"
+          className="w-full rounded-md border border-slate-200 px-3 py-2"
+          placeholder="운영 메모를 입력하세요"
+          value={formState.memo}
+          onChange={(event) => setFormState((prev) => ({ ...prev, memo: event.target.value }))}
+        />
+      </div>
+
+      <div>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-3">
+            <span className="text-xs font-semibold text-slate-500">품목</span>
+            {hasWarehouseSelection ? (
+              <label className="flex cursor-pointer items-center gap-1 text-[11px] font-semibold text-slate-500">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded border border-slate-300"
+                  checked={hideZeroWarehouseStock}
+                  onChange={(event) => setHideZeroWarehouseStock(event.target.checked)}
+                />
+                {'해당 창고 보유품만 보기'}
+              </label>
+            ) : null}
+          </div>
+          <button type="button" className="text-xs font-semibold text-blue-600" onClick={handleAddItem}>
+            품목 추가
+          </button>
+        </div>
+        <div className="space-y-4">
+          {hasWarehouseSelection && hideZeroWarehouseStock && !hasPositiveStockForScope ? (
+            <p className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
+              '해당 창고에 보유 중인 상품이 없습니다.'
+            </p>
+          ) : null}
+          {formState.items.map((item, index) => {
+            const searchInputId = `product-search-${index}`;
+            const selectId = `product-select-${index}`;
+            const quantityInputId = `product-qty-${index}`;
+            const unitSelectId = `product-unit-${index}`;
+            const selectedProduct = item.sku
+              ? productOptions.find((entry) => entry.sku === item.sku) ?? null
+              : null;
+            let candidateProducts = productOptions;
+            if (
+              selectedProduct &&
+              candidateProducts.every((product) => product.sku !== selectedProduct.sku)
+            ) {
+              candidateProducts = [...candidateProducts, selectedProduct];
+            }
+            const candidateWithStats = candidateProducts.map((product) => ({
+              product,
+              stats: computeStatsForProduct(product),
+            }));
+            const normalizedSearch = item.searchTerm.trim().toLowerCase();
+            const searchFiltered = normalizedSearch
+              ? candidateWithStats.filter(({ product }) => {
+                  const name = product.name.toLowerCase();
+                  const sku = product.sku.toLowerCase();
+                  const id = product.productId?.toLowerCase() ?? '';
+                  return (
+                    name.includes(normalizedSearch) ||
+                    sku.includes(normalizedSearch) ||
+                    id.includes(normalizedSearch)
+                  );
+                })
+              : candidateWithStats;
+            const productChoices =
+              hideZeroWarehouseStock && hasWarehouseSelection && !normalizedSearch
+                ? searchFiltered.filter(({ product, stats }) => {
+                    const scopedQty = stats?.warehouseQuantity ?? 0;
+                    if (scopedQty > 0) {
+                      return true;
+                    }
+                    return selectedProduct?.sku === product.sku;
+                  })
+                : searchFiltered;
+            const hasVisibleOptions = productChoices.length > 0;
+            const { warehouseQuantity } = computeStatsForProduct(selectedProduct);
+            const stockContext = (() => {
+              if (!formState.warehouseCode) {
+                return null;
+              }
+              const baseUnit = selectedProduct?.unit ?? item.unit ?? DEFAULT_UNIT;
+              const warehouseLabel =
+                resolvedWarehouseRecord?.name?.trim() ?? '선택한 창고';
+              const warehouseText = `현재 재고: ${(warehouseQuantity ?? 0).toLocaleString('ko-KR')} ${baseUnit} (${warehouseLabel})`;
+              return warehouseText;
+            })();
+            const stockLabel = stockContext;
+            return (
+              <div key={index} className="grid grid-cols-1 gap-3 rounded-lg border border-slate-200 p-4 sm:grid-cols-12">
+                <div className="sm:col-span-7">
+                  <label className="mb-1 block text-[11px] font-semibold text-slate-500" htmlFor={searchInputId}>
+                    상품 검색
+                  </label>
+                  <div className="space-y-2">
+                    <input
+                      id={searchInputId}
+                      className="w-full rounded-md border border-slate-200 px-3 py-2"
+                      placeholder="상품명이나 SKU로 검색"
+                      value={item.searchTerm}
+                      onChange={(event) =>
+                        handleChangeItem(index, {
+                          searchTerm: event.target.value,
+                        })
+                      }
+                    />
+                    <label
+                      className="block text-[11px] font-semibold text-slate-500"
+                      htmlFor={selectId}
+                    >
+                      상품
+                    </label>
+                    <div className="flex items-center gap-2">
+                      {(() => {
+                        const optionOptions = productChoices.map(({ product, stats }) => {
+                          const warehouseQuantityText = hasWarehouseSelection
+                            ? (stats?.warehouseQuantity ?? 0).toLocaleString('ko-KR')
+                            : null;
+                          const label = hasWarehouseSelection
+                            ? `${product.name} (${product.sku}) · ${warehouseQuantityText}`
+                            : `${product.name} (${product.sku})`;
+                          return { label, value: product.sku };
+                        });
+                        const placeholderText = loadingProducts
+                          ? '상품을 불러오는 중...'
+                          : hasVisibleOptions
+                          ? '상품 선택'
+                          : normalizedSearch
+                          ? '검색 결과가 없습니다.'
+                          : hideZeroWarehouseStock && hasWarehouseSelection
+                          ? '창고에 보유 중인 상품이 없습니다.'
+                          : '상품 선택';
+                        return (
+                          <SelectDropdown
+                            id={selectId}
+                            className="w-full"
+                            value={item.sku}
+                            onChange={(next) => {
+                              if (!next) {
+                                handleChangeItem(index, {
+                                  productId: null,
+                                  sku: '',
+                                  productName: '',
+                                  unit: 'EA',
+                                  searchTerm: '',
+                                });
+                                return;
+                              }
+                              const product = productOptions.find((entry) => entry.sku === next) ?? null;
+                              handleChangeItem(index, {
+                                productId: product?.productId ?? null,
+                                sku: next,
+                                productName: product?.name ?? '',
+                                searchTerm: product ? `${product.name} (${product.sku})` : item.searchTerm,
+                                unit: product?.unit ?? item.unit ?? 'EA',
+                              });
+                            }}
+                            options={optionOptions}
+                            placeholder={placeholderText}
+                            emptyMessage={placeholderText}
+                            inputClassName="w-full rounded-md border border-slate-200 px-3 py-2"
+                            disabled={loadingProducts}
+                          />
+                        );
+                      })()}
+                      <button
+                        type="button"
+                        aria-label="선택 초기화"
+                        title="선택 초기화"
+                        className="shrink-0 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-500 disabled:cursor-not-allowed disabled:opacity-50"
+                        onClick={() => {
+                          if (!item.sku) return;
+                          handleChangeItem(index, {
+                            productId: null,
+                            sku: '',
+                            productName: '',
+                            unit: DEFAULT_UNIT,
+                            searchTerm: '',
+                          });
+                          const el = document.getElementById(searchInputId) as HTMLInputElement | null;
+                          el?.focus();
+                        }}
+                        disabled={!item.sku}
+                      >
+                        초기화
+                      </button>
+                    </div>
+                    {stockLabel ? (
+                      <p className="text-[11px] text-slate-500">{stockLabel}</p>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="sm:col-span-4">
+                  <label className="mb-1 block text-[11px] font-semibold text-slate-500" htmlFor={quantityInputId}>
+                    수량 / 단위
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      id={quantityInputId}
+                      type="number"
+                      min={0}
+                      className="w-full rounded-md border border-slate-200 px-3 py-2"
+                      value={item.qty}
+                      onChange={(event) => handleChangeItem(index, { qty: event.target.value })}
+                    />
+                    <SelectDropdown
+                      id={unitSelectId}
+                      className="w-28"
+                      value={item.unit}
+                      onChange={(next) => handleChangeItem(index, { unit: next })}
+                      options={unitDropdownOptions}
+                      placeholder="단위"
+                      inputClassName="w-28 rounded-md border border-slate-200 px-2 py-2"
+                    />
+                  </div>
+                </div>
+                <div className="sm:col-span-1 sm:text-right">
+                  <button
+                    type="button"
+                    className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-500"
+                    onClick={() => handleRemoveItem(index)}
+                  >
+                    삭제
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {productFetchError ? (
+          <div className="flex items-center justify-between rounded-md bg-rose-50 p-2 text-xs text-rose-600">
+            <p className="pr-4">{productFetchError}</p>
+            <button
+              type="button"
+              className="rounded border border-rose-200 px-2 py-1 text-[11px] font-semibold text-rose-600"
+              onClick={handleRetryProducts}
+              disabled={loadingProducts}
+            >
+              다시 시도
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      {error ? <p className="rounded-md bg-rose-50 p-3 text-sm text-rose-600">{error}</p> : null}
+
+      <div className="flex justify-end gap-2 pt-2">
+        {onCancel ? (
+          <button
+            type="button"
+            className="rounded-md border border-slate-200 px-4 py-2 text-sm text-slate-600"
+            onClick={onCancel}
+            disabled={submitting}
+          >
+            {cancelButtonLabel}
+          </button>
+        ) : null}
+        <button
+          type="submit"
+          className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white"
+          disabled={submitting}
+        >
+          {submitting ? `${submitButtonLabel} 중...` : submitButtonLabel}
+        </button>
+      </div>
+    </form>
+  );
+};
+
+export const __test__ = {
+  buildPartnerOptions,
+  resolveDefaultPartnerId,
+};
+
+export default NewOrderForm;

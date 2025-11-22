@@ -1,0 +1,149 @@
+import { cancelSalesOrder, createSalesOrder, getSalesOrder, listSalesOrders, saveSalesOrderDraft, parseOrderDateContext, peekNextSalesOrderNumberForContext, } from '../stores/salesOrdersStore.js';
+import { MAX_PURCHASE_ORDER_RANGE_MS } from '../../../shared/datetime/ranges.js';
+const parseUtcTimestamp = (value) => {
+    if (!value) {
+        return null;
+    }
+    const normalized = value.trim();
+    if (!normalized) {
+        return null;
+    }
+    const parsed = Date.parse(normalized);
+    return Number.isNaN(parsed) ? null : parsed;
+};
+const rangeError = (reply, message) => reply.code(400).send({ success: false, error: message });
+const normalizeSalesOrderLines = (lines) => {
+    if (!Array.isArray(lines)) {
+        return [];
+    }
+    return lines.map((line) => ({
+        sku: typeof line.sku === 'string' ? line.sku : '',
+        orderedQty: typeof line.orderedQty === 'number' ? line.orderedQty : 0,
+        productName: typeof line.productName === 'string' ? line.productName : undefined,
+        unit: typeof line.unit === 'string' ? line.unit : undefined,
+        unitPrice: typeof line.unitPrice === 'number' ? line.unitPrice : undefined,
+        amount: typeof line.amount === 'number' ? line.amount : undefined,
+        taxAmount: typeof line.taxAmount === 'number' ? line.taxAmount : undefined,
+        taxLabel: typeof line.taxLabel === 'string' ? line.taxLabel : undefined,
+        currency: typeof line.currency === 'string' ? line.currency : undefined,
+        taxTypeId: typeof line.taxTypeId === 'string' ? line.taxTypeId : undefined,
+    }));
+};
+const buildSalesOrderPayload = (body) => ({
+    customerId: body.customerId.trim(),
+    customerName: typeof body.customerName === 'string' ? body.customerName : undefined,
+    orderNumber: typeof body.orderNumber === 'string' ? body.orderNumber : undefined,
+    orderDate: typeof body.orderDate === 'string' ? body.orderDate : undefined,
+    memo: body.memo,
+    promisedDate: body.promisedDate,
+    lines: normalizeSalesOrderLines(body.lines),
+});
+export default async function salesOrdersRoutes(server) {
+    server.get('/', (request, reply) => {
+        const { from, to } = request.query;
+        const parsedFrom = parseUtcTimestamp(from);
+        const parsedTo = parseUtcTimestamp(to);
+        if (from && parsedFrom === null) {
+            return rangeError(reply, '올바른 시작일을 입력해 주세요.');
+        }
+        if (to && parsedTo === null) {
+            return rangeError(reply, '올바른 종료일을 입력해 주세요.');
+        }
+        if (parsedFrom !== null && parsedTo !== null && parsedFrom > parsedTo) {
+            return rangeError(reply, '시작일은 종료일보다 앞서야 합니다.');
+        }
+        if (parsedFrom !== null) {
+            const effectiveTo = parsedTo ?? Date.now();
+            if (effectiveTo - parsedFrom > MAX_PURCHASE_ORDER_RANGE_MS) {
+                return rangeError(reply, '최대 조회 가능 기간은 365일입니다.');
+            }
+        }
+        return reply.send({
+            success: true,
+            items: listSalesOrders({
+                from: parsedFrom ?? undefined,
+                to: parsedTo ?? undefined,
+            }),
+        });
+    });
+    server.get('/next-number', (request, reply) => {
+        const { orderDate } = request.query;
+        const parsedOrderDate = parseOrderDateContext(orderDate);
+        if (!parsedOrderDate) {
+            return rangeError(reply, '올바른 주문일을 입력해 주세요.');
+        }
+        const nextNumber = peekNextSalesOrderNumberForContext(parsedOrderDate);
+        return reply.send({
+            success: true,
+            item: {
+                orderNumber: nextNumber.orderNumber,
+                orderDate: nextNumber.orderDate,
+                sequence: nextNumber.sequence,
+            },
+        });
+    });
+    server.get('/:id', (request, reply) => {
+        const { id } = request.params;
+        const order = getSalesOrder(id);
+        if (!order) {
+            return reply.code(404).send({ success: false, error: 'Sales order not found' });
+        }
+        return reply.send({ success: true, item: order });
+    });
+    server.post('/', (request, reply) => {
+        const body = request.body ?? {};
+        if (!body.customerId || !body.lines || body.lines.length === 0) {
+            return reply.code(400).send({ success: false, error: 'customerId and lines are required' });
+        }
+        const payload = buildSalesOrderPayload(body);
+        const order = createSalesOrder(payload);
+        return reply.code(201).send({ success: true, item: order });
+    });
+    server.post('/drafts', (request, reply) => {
+        const body = request.body ?? {};
+        if (!body.customerId || !body.lines || body.lines.length === 0) {
+            return reply.code(400).send({ success: false, error: 'customerId and lines are required' });
+        }
+        try {
+            const payload = buildSalesOrderPayload(body);
+            const draft = saveSalesOrderDraft({ ...payload, status: 'draft' });
+            return reply.code(201).send({ success: true, item: draft });
+        }
+        catch (error) {
+            console.error('[salesOrders] failed to save draft', error);
+            return reply.code(500).send({ success: false, error: '임시 저장에 실패했습니다.' });
+        }
+    });
+    server.put('/drafts/:id', (request, reply) => {
+        const { id } = request.params;
+        const body = request.body ?? {};
+        if (!body.customerId || !body.lines || body.lines.length === 0) {
+            return reply.code(400).send({ success: false, error: 'customerId and lines are required' });
+        }
+        try {
+            const payload = buildSalesOrderPayload(body);
+            const draft = saveSalesOrderDraft({ ...payload, id, status: 'draft' });
+            return reply.send({ success: true, item: draft });
+        }
+        catch (error) {
+            console.error('[salesOrders] failed to update draft', error);
+            if (error instanceof Error) {
+                if (error.message.includes('not found')) {
+                    return reply.code(404).send({ success: false, error: '주문서를 찾을 수 없습니다.' });
+                }
+                if (error.message.includes('Drafts can only be updated')) {
+                    return reply.code(400).send({ success: false, error: '임시 저장 중인 주문서만 수정할 수 있습니다.' });
+                }
+            }
+            return reply.code(500).send({ success: false, error: '임시 저장 업데이트에 실패했습니다.' });
+        }
+    });
+    server.put('/:id/cancel', (request, reply) => {
+        const { id } = request.params;
+        const order = cancelSalesOrder(id);
+        if (!order) {
+            return reply.code(404).send({ success: false, error: 'Sales order not found' });
+        }
+        return reply.send({ success: true, item: order });
+    });
+}

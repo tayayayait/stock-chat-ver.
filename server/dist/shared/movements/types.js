@@ -1,0 +1,1 @@
+export const MOVEMENT_TYPES = ['RECEIPT', 'ISSUE', 'ADJUST', 'TRANSFER', 'RETURN'];

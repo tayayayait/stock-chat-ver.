@@ -1,0 +1,76 @@
+
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📦</text></svg>">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>StockWise - 재고 관리</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css" />
+    <link rel="stylesheet" href="/src/styles/print.css" media="print" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      :root {
+        --ui-scale: 1;
+      }
+
+      body {
+        min-height: 100vh;
+        zoom: var(--ui-scale);
+      }
+
+      #ui-scale-indicator {
+        position: fixed;
+        right: 1rem;
+        bottom: 1rem;
+        padding: 0.4rem 0.75rem;
+        background: rgba(15, 23, 42, 0.8);
+        color: white;
+        border-radius: 9999px;
+        font-size: 0.9rem;
+        font-family: 'Inter', 'Pretendard', sans-serif;
+        letter-spacing: 0.02em;
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.25);
+        pointer-events: none;
+        transition: opacity 150ms ease, transform 150ms ease;
+      }
+    </style>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              primary: {
+                '50': '#eff6ff',
+                '100': '#dbeafe',
+                '200': '#bfdbfe',
+                '300': '#93c5fd',
+                '400': '#60a5fa',
+                '500': '#3b82f6',
+                '600': '#2563eb',
+                '700': '#1d4ed8',
+                '800': '#1e40af',
+                '900': '#1e3a8a',
+                '950': '#172554',
+              },
+            },
+            fontFamily: {
+              sans: ['Inter', 'Pretendard', 'Noto Sans KR', 'system-ui', 'sans-serif'],
+            },
+          }
+        }
+      }
+    </script>
+  </head>
+    <body class="bg-slate-50 font-sans antialiased">
+      <div id="root"></div>
+      <div id="ui-scale-indicator" aria-live="polite">110%</div>
+      <script type="module" src="/src/main.tsx"></script>
+    </body>
+  </html>
