@@ -7,6 +7,24 @@ const chatClient = apiKey ? new OpenAI({ apiKey }) : null;
 const OPENAI_CHAT_MODEL = (process.env.OPENAI_CHAT_MODEL || 'gpt-5').trim();
 const MAX_HISTORY = 12;
 
+const resolveChatTemperature = (model) => {
+  const envValue = process.env.OPENAI_CHAT_TEMPERATURE;
+  if (envValue !== undefined) {
+    const parsed = Number(envValue);
+    if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 2) {
+      return parsed;
+    }
+  }
+
+  if (model.startsWith('gpt-5')) {
+    return 1;
+  }
+
+  return 0.2;
+};
+
+const CHAT_TEMPERATURE = resolveChatTemperature(OPENAI_CHAT_MODEL);
+
 const SYSTEM_PROMPT = `당신은 재고/수요/창고 운영을 돕는 한국어 전문 어시스턴트입니다.
 - 재고 부족 위험, 리드타임, 서비스 수준, 발주/판매 정보를 근거로 짧고 명확하게 답변하세요.
 - 추측하거나 근거 없는 수치를 만들어 내지 마세요. 데이터가 부족하면 "정보가 충분하지 않습니다"라고 말하세요.
@@ -124,7 +142,7 @@ export default async function chatbotRoutes(server) {
     try {
       const completion = await chatClient.chat.completions.create({
         model: OPENAI_CHAT_MODEL,
-        temperature: 0.2,
+        temperature: CHAT_TEMPERATURE,
         messages,
       });
 
