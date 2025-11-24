@@ -162,7 +162,23 @@ const PRODUCT_HEADER_SYNONYMS: Record<string, string[]> = {
   bufferDays: ['bufferdays', '안전기간'],
   supplyPrice: ['supplyprice', 'purchaseprice', 'cost', 'unitcost', 'buyprice', '구매가', '매입가', '매입단가'],
   salePrice: ['saleprice', 'listprice', 'retailprice', 'sellingprice', '판매가', '판매단가', '소비자가'],
-  warehouseLocation: ['warehouselocation', 'warehouse', 'warehousecode', '창고', '창고명', '물류센터', 'location'],
+  warehouseLocation: [
+    'warehouselocation',
+    // 코드/영문 표기
+    'warehouse',
+    'warehousecode',
+    'warehouse_name',
+    'warehouse-name',
+    // 한국어 표기 (창고명만 사용하는 경우)
+    '창고',
+    '창고명',
+    '물류센터',
+    // 과거 템플릿/가이드에서 사용되던 확장 표기
+    '창고명(상세위치)',
+    '창고코드/상세위치',
+    // 기타 location 류 표현
+    'location',
+  ],
 };
 
 const INITIAL_STOCK_HEADER_SYNONYMS: Record<string, string[]> = {
@@ -242,7 +258,7 @@ const DEFAULT_PRODUCT_TEMPLATE_SAMPLE: Record<string, string> = {
   expiryDays: '90',
   supplyPrice: '1080',
   salePrice: '1450',
-  warehouseLocation: 'ICN1',
+  warehouseLocation: '서울 풀필먼트 센터',
 };
 
 const PRODUCT_TEMPLATE_COLUMNS: Array<{ header: string; canonical: string }> = [
