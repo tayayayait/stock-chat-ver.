@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { ensureWarehouseSeedData, findWarehouseByCode } from './warehousesStore.js';
-import { deleteInventoryByLocation, renameInventoryLocation } from './inventoryStore.js';
 const locationStore = new Map();
 const readSeedPreference = () => process.env.SEED_SAMPLE_DATA === 'true';
 let autoSeed = readSeedPreference();
@@ -179,9 +178,6 @@ export function renameLocation(oldCode, payload) {
         locationStore.delete(oldCode);
     }
     locationStore.set(payload.code, updated);
-    if (payload.code !== oldCode || existing.warehouseCode !== payload.warehouseCode) {
-        renameInventoryLocation(oldCode, payload.code, payload.warehouseCode);
-    }
     return updated;
 }
 export function deleteLocation(code) {
@@ -191,7 +187,6 @@ export function deleteLocation(code) {
         return undefined;
     }
     locationStore.delete(code);
-    deleteInventoryByLocation(code);
     return existing;
 }
 export function deleteLocationsByWarehouse(warehouseCode) {
@@ -201,7 +196,6 @@ export function deleteLocationsByWarehouse(warehouseCode) {
         .filter((location) => location.warehouseCode === warehouseCode)
         .forEach((location) => {
         locationStore.delete(location.code);
-        deleteInventoryByLocation(location.code);
         removed.push(location);
     });
     return removed;

@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { ensureWarehouseSeedData, findWarehouseByCode, } from '../stores/warehousesStore.js';
-import { ensureLocationSeedData, findLocationByCode, } from '../stores/locationsStore.js';
 import { deleteInventoryForSku, listInventoryForSku, replaceInventoryForSku, summarizeInventory, __resetInventoryStore, } from '../stores/inventoryStore.js';
 import { deletePolicyDrafts, getPolicyDraft, hasPolicyDraft, renamePolicyDraft, upsertPolicyDraft, } from '../stores/policiesStore.js';
 import { ensureProductCategory } from '../stores/categoriesStore.js';
@@ -135,7 +134,6 @@ export function validateProductPayload(input) {
     const candidate = input;
     const errors = [];
     ensureWarehouseSeedData();
-    ensureLocationSeedData();
     const requiredStrings = ['sku', 'name', 'category'];
     requiredStrings.forEach((field) => {
         if (!isNonEmptyString(candidate[field])) {
@@ -235,31 +233,18 @@ export function validateProductPayload(input) {
                 }
                 const raw = item;
                 const warehouseCode = normalizeString(raw.warehouseCode);
-                const locationCode = normalizeString(raw.locationCode);
                 const onHandValue = raw.onHand;
                 const reservedValue = raw.reserved;
                 if (!warehouseCode) {
                     errors.push(`inventory[${index}].warehouseCode 필드는 비어있을 수 없습니다.`);
                 }
-                if (!locationCode) {
-                    errors.push(`inventory[${index}].locationCode 필드는 비어있을 수 없습니다.`);
-                }
                 if (warehouseCode && !findWarehouseByCode(warehouseCode)) {
                     errors.push(`inventory[${index}].warehouseCode 에 해당하는 물류센터가 없습니다.`);
                 }
-                if (locationCode) {
-                    const location = findLocationByCode(locationCode);
-                    if (!location) {
-                        errors.push(`inventory[${index}].locationCode 에 해당하는 로케이션이 없습니다.`);
-                    }
-                    else if (warehouseCode && location.warehouseCode !== warehouseCode) {
-                        errors.push(`inventory[${index}] 로케이션의 물류센터 코드가 일치하지 않습니다. (${location.warehouseCode})`);
-                    }
-                }
-                const key = `${warehouseCode}::${locationCode}`;
-                if (warehouseCode && locationCode) {
+                const key = warehouseCode;
+                if (warehouseCode) {
                     if (seen.has(key)) {
-                        errors.push(`inventory 항목에 중복된 로케이션(${warehouseCode}/${locationCode})이 있습니다.`);
+                        errors.push(`inventory 항목에 중복된 물류센터(${warehouseCode})가 있습니다.`);
                     }
                     else {
                         seen.add(key);
@@ -271,10 +256,10 @@ export function validateProductPayload(input) {
                 if (reservedValue !== undefined && !isFiniteNumber(reservedValue)) {
                     errors.push(`inventory[${index}].reserved 필드는 숫자여야 합니다.`);
                 }
-                if (warehouseCode && locationCode) {
+                if (warehouseCode) {
                     const onHand = Math.max(0, Math.round(onHandValue ?? 0));
                     const reserved = Math.max(0, Math.round(reservedValue ?? 0));
-                    inventoryEntries.push({ warehouseCode, locationCode, onHand, reserved });
+                    inventoryEntries.push({ warehouseCode, onHand, reserved });
                 }
             });
         }
@@ -327,15 +312,9 @@ function toResponse(record) {
     const summary = summarizeInventory(record.sku);
     const inventory = summary.items
         .slice()
-        .sort((a, b) => {
-        if (a.warehouseCode === b.warehouseCode) {
-            return a.locationCode.localeCompare(b.locationCode);
-        }
-        return a.warehouseCode.localeCompare(b.warehouseCode);
-    })
-        .map(({ warehouseCode, locationCode, onHand, reserved }) => ({
+        .sort((a, b) => a.warehouseCode.localeCompare(b.warehouseCode))
+        .map(({ warehouseCode, onHand, reserved }) => ({
         warehouseCode,
-        locationCode,
         onHand,
         reserved,
     }));
@@ -354,7 +333,6 @@ function ensureSeedData() {
         return;
     }
     ensureWarehouseSeedData();
-    ensureLocationSeedData();
     const seedProducts = [];
     seedProducts.forEach((sample) => {
         const now = new Date().toISOString();
@@ -371,7 +349,6 @@ function ensureSeedData() {
         replaceInventoryForSku(record.sku, inventory.map((entry) => ({
             sku: record.sku,
             warehouseCode: entry.warehouseCode,
-            locationCode: entry.locationCode,
             onHand: entry.onHand,
             reserved: entry.reserved,
         })));
@@ -423,7 +400,6 @@ export default async function productsRoutes(server) {
         const inventoryItems = (inventoryPayload ?? []).map((entry) => ({
             sku: record.sku,
             warehouseCode: entry.warehouseCode,
-            locationCode: entry.locationCode,
             onHand: entry.onHand,
             reserved: entry.reserved,
         }));
@@ -470,7 +446,6 @@ export default async function productsRoutes(server) {
             const inventoryItems = inventoryPayload.map((entry) => ({
                 sku: targetSku,
                 warehouseCode: entry.warehouseCode,
-                locationCode: entry.locationCode,
                 onHand: entry.onHand,
                 reserved: entry.reserved,
             }));
@@ -480,7 +455,6 @@ export default async function productsRoutes(server) {
             const moved = previousInventory.map((entry) => ({
                 sku: targetSku,
                 warehouseCode: entry.warehouseCode,
-                locationCode: entry.locationCode,
                 onHand: entry.onHand,
                 reserved: entry.reserved,
             }));
@@ -500,6 +474,44 @@ export default async function productsRoutes(server) {
             deletePolicyDrafts([sku]);
         }
         return reply.code(204).send();
+    });
+    // Admin utility to recompute ABC/XYZ grades across all products
+    server.post('/reclassify', async (_request, reply) => {
+        ensureSeedData();
+        const thresholds = getClassificationThresholds();
+        const records = Array.from(productStore.values());
+        const abcMap = classifyABC(records, thresholds);
+        let abcChanged = 0;
+        let xyzChanged = 0;
+        const items = [];
+        for (const record of records) {
+            const prevAbc = record.abcGrade;
+            const prevXyz = record.xyzGrade;
+            // ABC from cumulative share; if not included (no price/avg), keep previous
+            const nextAbc = abcMap.get(record.sku) ?? prevAbc;
+            // XYZ by CV thresholds
+            const nextXyz = classifyXYZ(record.dailyAvg, record.dailyStd, thresholds);
+            if (nextAbc !== prevAbc || nextXyz !== prevXyz) {
+                const updated = {
+                    ...record,
+                    abcGrade: nextAbc,
+                    xyzGrade: nextXyz,
+                    updatedAt: new Date().toISOString(),
+                };
+                productStore.set(record.sku, updated);
+                if (nextAbc !== prevAbc)
+                    abcChanged += 1;
+                if (nextXyz !== prevXyz)
+                    xyzChanged += 1;
+                items.push({ sku: record.sku, prev: { abc: prevAbc, xyz: prevXyz }, next: { abc: nextAbc, xyz: nextXyz } });
+            }
+        }
+        return reply.send({
+            success: true,
+            thresholds,
+            updated: { total: items.length, abcChanged, xyzChanged },
+            items: items.map((it) => ({ sku: it.sku, prev: it.prev, next: it.next })),
+        });
     });
 }
 export function __resetProductStore(seed = true) {
@@ -544,6 +556,82 @@ export function __adjustProductMovementTotals(sku, deltas) {
     };
     productStore.set(sku, updated);
 }
+// --- ABC/XYZ auto-classification (admin utility) ---
+function parseEnvFloat(key, fallback) {
+    const raw = process.env[key];
+    if (!raw)
+        return fallback;
+    const parsed = Number.parseFloat(String(raw));
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+function safeNumber(value) {
+    if (typeof value !== 'number' || !Number.isFinite(value))
+        return null;
+    return value;
+}
+function pickPrice(record) {
+    return (safeNumber(record.referencePrice) ??
+        safeNumber(record.supplyPrice) ??
+        safeNumber(record.salePrice) ??
+        null);
+}
+function getClassificationThresholds() {
+    const abcAShare = Math.min(0.99, Math.max(0.01, parseEnvFloat('ABC_A_SHARE', 0.8)));
+    const abcBShare = Math.min(0.999, Math.max(abcAShare, parseEnvFloat('ABC_B_SHARE', 0.95)));
+    const xyzX = Math.max(0, parseEnvFloat('XYZ_X_CV', 0.5));
+    const xyzY = Math.max(xyzX, parseEnvFloat('XYZ_Y_CV', 1.0));
+    return { abcAShare, abcBShare, xyzX, xyzY };
+}
+function classifyXYZ(mu, sigma, thresholds) {
+    if (!(Number.isFinite(mu) && Number.isFinite(sigma)))
+        return 'Z';
+    if (mu < 0.1)
+        return 'Z';
+    const cv = sigma / Math.max(mu, 0.1);
+    if (cv < thresholds.xyzX)
+        return 'X';
+    if (cv < thresholds.xyzY)
+        return 'Y';
+    return 'Z';
+}
+function classifyABC(products, thresholds) {
+    const rows = [];
+    for (const p of products) {
+        const price = pickPrice(p);
+        const mu = Number.isFinite(p.dailyAvg) ? Math.max(0, p.dailyAvg) : 0;
+        if (price !== null && price > 0 && mu > 0) {
+            const annualValue = price * mu * 365;
+            if (Number.isFinite(annualValue) && annualValue > 0) {
+                rows.push({ sku: p.sku, value: annualValue });
+            }
+        }
+    }
+    rows.sort((a, b) => b.value - a.value);
+    const total = rows.reduce((sum, r) => sum + r.value, 0);
+    const result = new Map();
+    if (total <= 0) {
+        // No meaningful values; default to keeping existing grades outside
+        return result;
+    }
+    let cumulative = 0;
+    for (const r of rows) {
+        cumulative += r.value;
+        const share = cumulative / total;
+        let grade;
+        if (share <= thresholds.abcAShare)
+            grade = 'A';
+        else if (share <= thresholds.abcBShare)
+            grade = 'B';
+        else
+            grade = 'C';
+        result.set(r.sku, grade);
+    }
+    return result;
+}
+/**
+ * POST /api/products/reclassify
+ * Recompute ABC/XYZ for all products using current metrics and optional env thresholds.
+ */
 export function __upsertProduct(value, options) {
     ensureProductCategory(value.category, value.subCategory);
     ensureSeedData();
@@ -572,7 +660,6 @@ export function __upsertProduct(value, options) {
         const inventoryItems = (inventoryPayload ?? []).map((entry) => ({
             sku: record.sku,
             warehouseCode: entry.warehouseCode,
-            locationCode: entry.locationCode,
             onHand: entry.onHand,
             reserved: entry.reserved,
         }));
@@ -611,7 +698,6 @@ export function __upsertProduct(value, options) {
         const inventoryItems = inventoryPayload.map((entry) => ({
             sku: targetSku,
             warehouseCode: entry.warehouseCode,
-            locationCode: entry.locationCode,
             onHand: entry.onHand,
             reserved: entry.reserved,
         }));
@@ -621,7 +707,6 @@ export function __upsertProduct(value, options) {
         const moved = previousInventory.map((entry) => ({
             sku: targetSku,
             warehouseCode: entry.warehouseCode,
-            locationCode: entry.locationCode,
             onHand: entry.onHand,
             reserved: entry.reserved,
         }));

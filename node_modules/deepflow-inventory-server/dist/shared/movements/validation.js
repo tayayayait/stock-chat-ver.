@@ -89,6 +89,8 @@ export const validateMovementDraft = (input, options = {}) => {
     const toLocationValue = sanitizeOptionalString(input.toLocation, MAX_REFERENCE_LENGTH);
     const poIdValue = sanitizeOptionalString(input.poId, MAX_REFERENCE_LENGTH);
     const poLineIdValue = sanitizeOptionalString(input.poLineId, MAX_REFERENCE_LENGTH);
+    const soIdValue = sanitizeOptionalString(input.soId, MAX_REFERENCE_LENGTH);
+    const soLineIdValue = sanitizeOptionalString(input.soLineId, MAX_REFERENCE_LENGTH);
     const partnerIdValue = sanitizeOptionalString(input.partnerId, MAX_REFERENCE_LENGTH);
     const refNoValue = sanitizeOptionalString(input.refNo, MAX_REFERENCE_LENGTH);
     const memoValue = sanitizeOptionalString(input.memo, MAX_MEMO_LENGTH);
@@ -109,6 +111,8 @@ export const validateMovementDraft = (input, options = {}) => {
             toLocation: toLocationValue,
             poId: poIdValue,
             poLineId: poLineIdValue,
+            soId: soIdValue,
+            soLineId: soLineIdValue,
             partnerId: partnerIdValue,
             refNo: refNoValue,
             memo: memoValue,

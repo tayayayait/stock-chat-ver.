@@ -1,4 +1,4 @@
-import { getKstDayBoundsUtc } from './kst';
+import { getKstDayBoundsUtc } from './kst.js';
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 export const MAX_PURCHASE_ORDER_RANGE_DAYS = 365;

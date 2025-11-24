@@ -32,7 +32,6 @@ async function main() {
                 inventory: [
                     {
                         warehouseCode: 'WH-SEOUL',
-                        locationCode: 'SEOUL-A1',
                         onHand: 0,
                         reserved: 0,
                     },
@@ -45,7 +44,6 @@ async function main() {
             sku: 'SKU-01',
             qty: 100,
             toWarehouse: 'WH-SEOUL',
-            toLocation: 'SEOUL-A1',
             occurredAt: '2024-05-01T10:00:00.000Z',
             userId: 'user-1',
             memo: '�??�고',
@@ -68,7 +66,6 @@ async function main() {
             sku: 'SKU-01',
             qty: 40,
             fromWarehouse: 'WH-SEOUL',
-            fromLocation: 'SEOUL-A1',
             occurredAt: '2024-05-02T08:00:00.000Z',
             userId: 'user-2',
             refNo: 'ORDER-1',
@@ -87,9 +84,7 @@ async function main() {
             sku: 'SKU-01',
             qty: 20,
             fromWarehouse: 'WH-SEOUL',
-            fromLocation: 'SEOUL-A1',
             toWarehouse: 'WH-BUSAN',
-            toLocation: 'BUSAN-A1',
             occurredAt: '2024-05-03T09:00:00.000Z',
             userId: 'user-3',
             partnerId: '3PL-01',
@@ -109,7 +104,6 @@ async function main() {
             sku: 'SKU-01',
             qty: 15,
             toWarehouse: 'WH-BUSAN',
-            toLocation: 'BUSAN-A1',
             occurredAt: '2024-05-04T11:30:00.000Z',
             userId: 'auditor',
         };
@@ -142,7 +136,6 @@ async function main() {
                 sku: 'SKU-01',
                 qty: 30,
                 toWarehouse: 'WH-SEOUL',
-                toLocation: 'SEOUL-A1',
                 occurredAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
                 userId: 'user-future',
             },
@@ -170,7 +163,7 @@ async function main() {
         const initialProductBody = initialProduct.json();
         const initialOnHand = initialProductBody.item.onHand;
         const initialInbound = initialProductBody.item.totalInbound;
-        const initialLocation = initialProductBody.item.inventory.find((entry) => entry.locationCode === 'SEOUL-A1');
+        const initialLocation = initialProductBody.item.inventory.find((entry) => entry.warehouseCode === 'WH-SEOUL');
         assert.ok(initialLocation);
         const productMovement = await server.inject({
             method: 'POST',
@@ -180,7 +173,6 @@ async function main() {
                 sku: trackedSku,
                 qty: 75,
                 toWarehouse: 'WH-SEOUL',
-                toLocation: 'SEOUL-A1',
                 occurredAt: '2024-05-06T09:00:00.000Z',
                 userId: 'inventory-sync-test',
             },
@@ -195,7 +187,7 @@ async function main() {
         assert.equal(refreshedProduct.statusCode, 200);
         const refreshedBody = refreshedProduct.json();
         assert.equal(refreshedBody.item.onHand, initialOnHand + 75);
-        const refreshedLocation = refreshedBody.item.inventory.find((entry) => entry.locationCode === 'SEOUL-A1');
+        const refreshedLocation = refreshedBody.item.inventory.find((entry) => entry.warehouseCode === 'WH-SEOUL');
         assert.ok(refreshedLocation);
         assert.equal(refreshedLocation.onHand, initialLocation.onHand + 75);
         assert.equal(refreshedBody.item.totalInbound, initialInbound + 75);

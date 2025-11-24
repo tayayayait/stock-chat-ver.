@@ -46,7 +46,7 @@ async function main() {
             reserved: 0,
             risk: '결품위험',
             inventory: [
-                { warehouseCode: 'WH-SEOUL', locationCode: 'SEOUL-A1', onHand: 50, reserved: 5 },
+                { warehouseCode: 'WH-SEOUL', onHand: 50, reserved: 5 },
             ],
         };
         const createProductResponse = await server.inject({
@@ -63,7 +63,6 @@ async function main() {
                 sku: 'SKU-GHOST',
                 qty: 20,
                 toWarehouse: 'WH-BUSAN',
-                toLocation: 'BUSAN-A1',
                 userId: 'tester',
                 occurredAt: new Date().toISOString(),
             },
@@ -94,7 +93,7 @@ async function main() {
         assert.ok(body.insights.shortages.length > 0);
         const [shortage] = body.insights.shortages;
         assert.equal(shortage.sku, 'SKU-COFFEE');
-        assert.equal(shortage.primaryLocation, 'SEOUL-A1');
+        assert.ok(shortage.primaryLocation === null || typeof shortage.primaryLocation === 'string');
         assert.ok(Array.isArray(shortage.trend));
         assert.ok(shortage.trend.length >= 2);
         assert.ok(body.warehouseTotals.every((entry) => entry.warehouseCode !== 'WH-BUSAN'), 'Warehouse totals should not include SKUs without products');
@@ -106,7 +105,6 @@ async function main() {
                 sku: 'SKU-COFFEE',
                 qty: 5,
                 fromWarehouse: 'WH-SEOUL',
-                fromLocation: 'SEOUL-A1',
                 userId: 'tester',
                 occurredAt: new Date().toISOString(),
             },

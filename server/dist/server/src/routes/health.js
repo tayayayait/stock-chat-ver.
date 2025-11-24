@@ -1,3 +1,7 @@
 export default async function healthRoutes(fastify) {
-    fastify.get('/', async () => ({ status: 'ok' }));
+    fastify.route({
+        method: ['GET', 'HEAD'],
+        url: '/',
+        handler: async () => ({ status: 'ok' }),
+    });
 }

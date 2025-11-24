@@ -6,7 +6,6 @@ import { __resetLocationStore } from '../stores/locationsStore.js';
 import { __resetInventoryStore } from '../stores/inventoryStore.js';
 async function main() {
     __resetWarehouseStore(false);
-    __resetLocationStore(false);
     __resetInventoryStore();
     __resetProductStore(false);
     const server = await buildServer();
@@ -23,24 +22,6 @@ async function main() {
             payload: { code: 'WH-T2', name: '테스트 물류센터 2', address: '부산시 테스트로 2' },
         });
         assert.equal(wh2.statusCode, 201);
-        const loc1 = await server.inject({
-            method: 'POST',
-            url: '/api/locations',
-            payload: { code: 'LOC-T1-A', warehouseCode: 'WH-T1', description: '테스트 존 A' },
-        });
-        assert.equal(loc1.statusCode, 201);
-        const loc2 = await server.inject({
-            method: 'POST',
-            url: '/api/locations',
-            payload: { code: 'LOC-T2-B', warehouseCode: 'WH-T2', description: '테스트 존 B' },
-        });
-        assert.equal(loc2.statusCode, 201);
-        const loc3 = await server.inject({
-            method: 'POST',
-            url: '/api/locations',
-            payload: { code: 'LOC-T2-C', warehouseCode: 'WH-T2', description: '테스트 존 C' },
-        });
-        assert.equal(loc3.statusCode, 201);
         const payload = {
             sku: 'SKU-001',
             name: '테스트 제품',
@@ -63,8 +44,8 @@ async function main() {
             risk: '정상',
             expiryDays: 120,
             inventory: [
-                { warehouseCode: 'WH-T1', locationCode: 'LOC-T1-A', onHand: 120, reserved: 20 },
-                { warehouseCode: 'WH-T2', locationCode: 'LOC-T2-B', onHand: 80, reserved: 10 },
+                { warehouseCode: 'WH-T1', onHand: 120, reserved: 20 },
+                { warehouseCode: 'WH-T2', onHand: 80, reserved: 10 },
             ],
         };
         const createResponse = await server.inject({
@@ -110,8 +91,8 @@ async function main() {
             totalOutbound: 880,
             avgOutbound7d: 24,
             inventory: [
-                { warehouseCode: 'WH-T1', locationCode: 'LOC-T1-A', onHand: 140, reserved: 30 },
-                { warehouseCode: 'WH-T2', locationCode: 'LOC-T2-C', onHand: 60, reserved: 0 },
+                { warehouseCode: 'WH-T1', onHand: 140, reserved: 30 },
+                { warehouseCode: 'WH-T2', onHand: 60, reserved: 0 },
             ],
         };
         const updateResponse = await server.inject({
@@ -126,7 +107,6 @@ async function main() {
         assert.equal(updatedBody.item.onHand, 200);
         assert.equal(updatedBody.item.reserved, 30);
         assert.equal(updatedBody.item.inventory.length, 2);
-        assert.equal(updatedBody.item.inventory[1].locationCode, 'LOC-T2-C');
         assert.equal(updatedBody.item.totalInbound, updatePayload.totalInbound);
         assert.equal(updatedBody.item.totalOutbound, updatePayload.totalOutbound);
         assert.equal(updatedBody.item.avgOutbound7d, updatePayload.avgOutbound7d);

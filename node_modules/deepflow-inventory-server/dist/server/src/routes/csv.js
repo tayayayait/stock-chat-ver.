@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { validateProductPayload, __findProductBySku, __getProductRecords, __upsertProduct, } from './products.js';
 import { ensureWarehouseSeedData, findWarehouseByCode, findWarehouseByName, listWarehouses, findOrCreateWarehouseByName, } from '../stores/warehousesStore.js';
-import { ensureLocationSeedData, findLocationByCode, listLocations, findOrCreateLocation, } from '../stores/locationsStore.js';
 const CSV_TYPES = ['products', 'initial_stock', 'movements'];
 const CSV_HEADER_CONFIG = {
     products: {
@@ -27,11 +26,11 @@ const CSV_HEADER_CONFIG = {
         ],
     },
     initial_stock: {
-        required: ['sku', 'warehouse', 'location', 'onHand'],
+        required: ['sku', 'warehouse', 'onHand'],
         optional: ['reserved'],
     },
     movements: {
-        required: ['sku', 'warehouse', 'location', 'partner', 'type', 'quantity'],
+        required: ['sku', 'warehouse', 'partner', 'type', 'quantity'],
         optional: ['reference', 'occurredAt'],
     },
 };
@@ -76,26 +75,25 @@ const PRODUCT_HEADER_SYNONYMS = {
     salePrice: ['saleprice', 'listprice', 'retailprice', 'sellingprice', '판매가', '판매단가', '소비자가'],
     warehouseLocation: [
         'warehouselocation',
-        'warehouse_location',
-        'warehouse-location',
-        '창고명(상세위치)',
-        '창고명상세위치',
-        '창고상세',
-        '창고위치',
+        'warehouse',
+        'warehousecode',
+        'warehouse_name',
+        'warehouse-name',
+        '창고',
         '창고명',
+        '물류센터',
+        'location',
     ],
 };
 const INITIAL_STOCK_HEADER_SYNONYMS = {
     sku: ['sku', '품목코드', '상품코드', 'itemcode'],
     warehouse: ['warehouse', '창고', '물류센터', 'warehousecode', 'wh'],
-    location: ['location', '로케이션', 'bin', 'shelf', 'rack', '위치', 'locationcode'],
     onHand: ['onhand', 'currentstock', '재고', '재고수량', '현재고'],
     reserved: ['reserved', '예약', '할당', 'reserve'],
 };
 const MOVEMENT_HEADER_SYNONYMS = {
     sku: ['sku', '품목코드', '상품코드', 'itemcode'],
     warehouse: ['warehouse', '창고', '물류센터', 'warehousecode', 'wh', '출고창고', '입고창고'],
-    location: ['location', '로케이션', 'bin', 'shelf', 'rack', '위치', 'locationcode'],
     partner: ['partner', '거래처', '거래처코드', 'partnerid', '벤더', 'customer'],
     quantity: ['quantity', 'qty', '수량', '수량ea', '입출고수량'],
     type: ['type', '거래유형', '입출고', 'direction', 'inout', '입출고구분'],
@@ -142,7 +140,7 @@ const DEFAULT_PRODUCT_TEMPLATE_SAMPLE = {
     expiryDays: '90',
     supplyPrice: '1080',
     salePrice: '1450',
-    warehouseLocation: '서울 풀필먼트 센터(상온 A1 랙 존)',
+    warehouseLocation: '서울 풀필먼트 센터',
 };
 const PRODUCT_TEMPLATE_COLUMNS = [
     { header: '제품명', canonical: 'name' },
@@ -151,20 +149,18 @@ const PRODUCT_TEMPLATE_COLUMNS = [
     { header: '하위카테고리', canonical: 'subCategory' },
     { header: '구매가', canonical: 'supplyPrice' },
     { header: '판매가', canonical: 'salePrice' },
-    { header: '창고명(상세위치)', canonical: 'warehouseLocation' },
+    { header: '창고명', canonical: 'warehouseLocation' },
     { header: '총수량', canonical: 'onHand' },
 ];
 const DEFAULT_INITIAL_STOCK_SAMPLE = {
     sku: 'SAMPLE-SKU-001',
     warehouse: 'ICN1',
-    location: 'A-01',
     onHand: '480',
     reserved: '30',
 };
 const DEFAULT_MOVEMENT_TEMPLATE_SAMPLE = {
     sku: 'SAMPLE-SKU-001',
     warehouse: 'ICN1',
-    location: 'A-01',
     partner: 'SUP-0001',
     type: 'INBOUND',
     quantity: '120',
@@ -176,9 +172,9 @@ const jobStore = new Map();
 const jobQueue = [];
 let activeJob = null;
 const warehouseCatalog = {
-    ICN1: { name: '인천 풀필먼트 센터', locations: ['A-01', 'A-02', 'B-01', 'B-02'] },
-    PUS1: { name: '부산 허브', locations: ['P-01', 'P-02', 'P-03'] },
-    DJN1: { name: '대전 물류센터', locations: ['D-01', 'D-02'] },
+    ICN1: { name: '인천 풀필먼트 센터' },
+    PUS1: { name: '부산 허브' },
+    DJN1: { name: '대전 물류센터' },
 };
 const partnerCatalog = new Set(['SUP-0001', 'SUP-0002', 'CUS-0001', 'CUS-0002']);
 const initialStockStore = new Map();
@@ -192,20 +188,18 @@ function seedInitialStock(records) {
     baseSkus.forEach((record, index) => {
         const warehouses = Object.keys(warehouseCatalog);
         const warehouse = warehouses[index % warehouses.length];
-        const location = warehouseCatalog[warehouse].locations[index % warehouseCatalog[warehouse].locations.length];
-        const key = buildStockKey(record.sku, warehouse, location);
+        const key = buildStockKey(record.sku, warehouse);
         initialStockStore.set(key, {
             sku: record.sku,
             warehouse,
-            location,
             onHand: Math.max(record.onHand ?? 0, 0),
             reserved: Math.max(record.reserved ?? 0, 0),
         });
     });
     stockSeeded = true;
 }
-function buildStockKey(sku, warehouse, location) {
-    return `${sku}::${warehouse}::${location}`;
+function buildStockKey(sku, warehouse) {
+    return `${sku}::${warehouse}`;
 }
 function parseCsv(text) {
     const rows = [];
@@ -412,43 +406,15 @@ function parseBoolean(value) {
     return undefined;
 }
 const toComparable = (value) => value.replace(/\s+/g, '').toLowerCase();
-function splitWarehouseLocation(value) {
-    const trimmed = value.trim();
-    if (!trimmed) {
-        return null;
-    }
-    const parenStart = trimmed.indexOf('(');
-    const parenEnd = trimmed.lastIndexOf(')');
-    if (parenStart !== -1 && parenEnd !== -1 && parenEnd > parenStart) {
-        const warehouse = trimmed.slice(0, parenStart).trim();
-        const location = trimmed.slice(parenStart + 1, parenEnd).trim();
-        if (warehouse && location) {
-            return { warehouse, location };
-        }
-    }
-    if (trimmed.includes('/')) {
-        const [warehouse, location] = trimmed.split('/').map((part) => part.trim());
-        if (warehouse && location) {
-            return { warehouse, location };
-        }
-    }
-    return null;
-}
-function parseWarehouseLocationField(raw) {
+function parseWarehouseField(raw) {
     if (!raw || !raw.trim()) {
-        return { success: false, errors: ['창고명(상세위치) 필드는 비어 있을 수 없습니다.'] };
+        return { success: false, errors: ['창고명 필드는 비어 있을 수 없습니다.'] };
     }
-    const parts = splitWarehouseLocation(raw);
-    if (!parts) {
-        return {
-            success: false,
-            errors: ['창고명(상세위치)는 "창고명(상세위치)" 또는 "창고코드/상세위치" 형식이어야 합니다.'],
-        };
+    const trimmedWarehouse = raw.trim();
+    if (!trimmedWarehouse) {
+        return { success: false, errors: ['창고명 필드는 비어 있을 수 없습니다.'] };
     }
     ensureWarehouseSeedData();
-    ensureLocationSeedData();
-    const trimmedWarehouse = parts.warehouse.trim();
-    const trimmedLocation = parts.location.trim();
     const warehouses = listWarehouses();
     const warehouseComparable = toComparable(trimmedWarehouse);
     let warehouseRecord = warehouses.find((warehouse) => toComparable(warehouse.code) === warehouseComparable) ??
@@ -464,42 +430,9 @@ function parseWarehouseLocationField(raw) {
             return { success: false, errors: [message] };
         }
     }
-    const locationComparable = toComparable(trimmedLocation);
-    const normalizedWarehouseCode = warehouseRecord.code;
-    const locationByCode = findLocationByCode(trimmedLocation);
-    if (locationByCode) {
-        if (toComparable(locationByCode.warehouseCode) !== toComparable(normalizedWarehouseCode)) {
-            return {
-                success: false,
-                errors: [`${trimmedLocation} 위치는 ${normalizedWarehouseCode} 창고에 속해 있지 않습니다.`],
-            };
-        }
-        return {
-            success: true,
-            value: { warehouseCode: normalizedWarehouseCode, locationCode: locationByCode.code },
-        };
-    }
-    const locations = listLocations();
-    let locationRecord = locations.find((location) => toComparable(location.warehouseCode) === toComparable(normalizedWarehouseCode) &&
-        toComparable(location.description) === locationComparable);
-    if (!locationRecord) {
-        try {
-            locationRecord = findOrCreateLocation(normalizedWarehouseCode, trimmedLocation);
-        }
-        catch (error) {
-            const message = error instanceof Error ? error.message : '상세 위치를 처리하는 중 예상치 못한 오류가 발생했습니다.';
-            return { success: false, errors: [message] };
-        }
-    }
-    if (toComparable(locationRecord.warehouseCode) !== toComparable(normalizedWarehouseCode)) {
-        return {
-            success: false,
-            errors: [`${trimmedLocation} 위치는 ${normalizedWarehouseCode} 창고에 속해 있지 않습니다.`],
-        };
-    }
     return {
         success: true,
-        value: { warehouseCode: normalizedWarehouseCode, locationCode: locationRecord.code },
+        value: { warehouseCode: warehouseRecord.code },
     };
 }
 const hasValue = (value) => typeof value === 'string' && value.trim().length > 0;
@@ -545,9 +478,9 @@ function parseProductRow(raw, lineNumber) {
     const supplyPriceValue = parseOptionalNonNegativeNumber(raw.supplyPrice, '구매가', errors);
     const salePriceValue = parseOptionalNonNegativeNumber(raw.salePrice, '판매가', errors);
     const onHandValue = parseRequiredNonNegativeInteger(raw.onHand, '총수량', errors);
-    const locationResult = parseWarehouseLocationField(raw.warehouseLocation);
-    if (!locationResult.success) {
-        errors.push(...locationResult.errors);
+    const warehouseResult = parseWarehouseField(raw.warehouseLocation);
+    if (!warehouseResult.success) {
+        errors.push(...warehouseResult.errors);
     }
     const dailyAvgValue = parseOptionalNonNegativeNumber(raw.dailyAvg, '일평균수요', errors) ?? 0;
     const dailyStdValue = parseOptionalNonNegativeNumber(raw.dailyStd, '수요표준편차', errors) ?? 0;
@@ -576,10 +509,9 @@ function parseProductRow(raw, lineNumber) {
         };
     }
     const normalizedOnHand = Math.max(0, Math.round(onHandValue ?? 0));
-    const inventoryEntry = locationResult.success
+    const inventoryEntry = warehouseResult.success
         ? {
-            warehouseCode: locationResult.value.warehouseCode,
-            locationCode: locationResult.value.locationCode,
+            warehouseCode: warehouseResult.value.warehouseCode,
             onHand: normalizedOnHand,
             reserved: 0,
         }
@@ -645,13 +577,6 @@ function parseInitialStockRow(raw, lineNumber) {
     else if (!warehouseCatalog[warehouse]) {
         errors.push('등록되지 않은 창고 코드입니다.');
     }
-    const location = normalizeKey(raw.location).toUpperCase();
-    if (!location) {
-        errors.push('location 필드는 필수입니다.');
-    }
-    else if (warehouse && warehouseCatalog[warehouse] && !warehouseCatalog[warehouse].locations.includes(location)) {
-        errors.push('창고에 존재하지 않는 보관위치입니다.');
-    }
     const onHandValue = parseNumber(raw.onHand);
     const reservedValue = parseNumber(raw.reserved);
     if (onHandValue === undefined || Number.isNaN(onHandValue)) {
@@ -672,11 +597,10 @@ function parseInitialStockRow(raw, lineNumber) {
     const payload = {
         sku,
         warehouse,
-        location,
         onHand: Math.max(Math.round(onHandValue ?? 0), 0),
         reserved: Math.max(Math.round(reservedValue ?? 0), 0),
     };
-    const key = buildStockKey(sku, warehouse, location);
+    const key = buildStockKey(sku, warehouse);
     const existing = initialStockStore.get(key);
     return {
         index: lineNumber - 1,
@@ -702,13 +626,6 @@ function parseMovementRow(raw, lineNumber) {
     }
     else if (!warehouseCatalog[warehouse]) {
         errors.push('등록되지 않은 창고 코드입니다.');
-    }
-    const location = normalizeKey(raw.location).toUpperCase();
-    if (!location) {
-        errors.push('location 필드는 필수입니다.');
-    }
-    else if (warehouse && warehouseCatalog[warehouse] && !warehouseCatalog[warehouse].locations.includes(location)) {
-        errors.push('창고에 존재하지 않는 보관위치입니다.');
     }
     const partner = normalizeKey(raw.partner).toUpperCase();
     if (!partner) {
@@ -762,7 +679,6 @@ function parseMovementRow(raw, lineNumber) {
     const payload = {
         sku,
         warehouse,
-        location,
         partner,
         quantity: Math.round(quantityValue ?? 0),
         type: normalizedType,
@@ -870,7 +786,7 @@ function applyRow(type, row) {
             break;
         case 'initial_stock': {
             const payload = row.payload;
-            const key = buildStockKey(payload.sku, payload.warehouse, payload.location);
+            const key = buildStockKey(payload.sku, payload.warehouse);
             initialStockStore.set(key, payload);
             break;
         }
@@ -926,7 +842,7 @@ function formatProductTemplateValue(record, column) {
         case 'warehouseLocation': {
             const firstInventory = record.inventory?.[0];
             if (firstInventory) {
-                return `${firstInventory.warehouseCode}(${firstInventory.locationCode})`;
+                return firstInventory.warehouseCode;
             }
             return DEFAULT_PRODUCT_TEMPLATE_SAMPLE.warehouseLocation ?? '';
         }

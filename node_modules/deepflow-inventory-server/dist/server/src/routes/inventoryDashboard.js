@@ -18,6 +18,61 @@ const DEFAULT_LEAD_TIME_DAYS = 14;
 const DEFAULT_MOVEMENT_WINDOW_DAYS = 60;
 const TREND_WINDOW_DAYS = 7;
 const DEFAULT_CORRELATION_RHO = 0.25;
+const parseEnvFloat = (key, fallback) => {
+    const raw = process.env[key];
+    if (!raw) {
+        return fallback;
+    }
+    const parsed = Number.parseFloat(raw);
+    return Number.isFinite(parsed) ? parsed : fallback;
+};
+const RISK_WEIGHT_SHORTAGE = parseEnvFloat('RISK_WEIGHT_SHORTAGE', 0.45);
+const RISK_WEIGHT_SUPPLY = parseEnvFloat('RISK_WEIGHT_SUPPLY', 0.35);
+const RISK_WEIGHT_DEMAND = parseEnvFloat('RISK_WEIGHT_DEMAND', 0.20);
+const RISK_THRESHOLD_WARNING = parseEnvFloat('RISK_THRESHOLD_WARNING', 0.3);
+const RISK_THRESHOLD_DANGER = parseEnvFloat('RISK_THRESHOLD_DANGER', 0.7);
+const RISK_MODEL_VERSION = process.env.RISK_MODEL_VERSION ?? 'v1';
+const clamp01 = (value) => Math.min(1, Math.max(0, value));
+const toSafeNumberValue = (value, fallback = 0) => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? Math.max(0, numeric) : fallback;
+};
+const computeDemandVolatility = (trend, fallbackAvg) => {
+    const normalizedFallback = Math.max(fallbackAvg, 0);
+    if (!Array.isArray(trend) || trend.length === 0) {
+        return normalizedFallback > 0 ? 0 : 0;
+    }
+    const values = trend.map((point) => Math.max(0, toSafeNumberValue(point?.outbound, 0)));
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const effectiveMean = Math.max(mean, normalizedFallback, 0);
+    if (effectiveMean <= 0) {
+        return 0;
+    }
+    const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+    const stdDev = Math.sqrt(variance);
+    return clamp01(stdDev / effectiveMean);
+};
+const computeRiskScoreForItem = (item) => {
+    const available = Math.max(0, toSafeNumberValue(item.available));
+    const safetyStock = Math.max(0, toSafeNumberValue(item.safetyStock));
+    const denominator = Math.max(safetyStock, 1);
+    const shortage = clamp01(1 - available / denominator);
+    const avgDailyInbound = Math.max(0, toSafeNumberValue(item.avgDailyInbound));
+    const avgDailyOutbound = Math.max(0, toSafeNumberValue(item.avgDailyOutbound));
+    const supply = avgDailyOutbound > 0 ? clamp01(1 - avgDailyInbound / avgDailyOutbound) : 0;
+    const demandVol = computeDemandVolatility(item.trend ?? [], avgDailyOutbound);
+    const rawScore = RISK_WEIGHT_SHORTAGE * shortage +
+        RISK_WEIGHT_SUPPLY * supply +
+        RISK_WEIGHT_DEMAND * demandVol;
+    const score = clamp01(rawScore);
+    if (score < RISK_THRESHOLD_WARNING) {
+        return { score, label: '안정' };
+    }
+    if (score < RISK_THRESHOLD_DANGER) {
+        return { score, label: '주의' };
+    }
+    return { score, label: '위험' };
+};
 const resolveServiceLevelZ = (percent) => {
     if (!Number.isFinite(percent)) {
         return 0;
@@ -123,10 +178,11 @@ const aggregateMovementHistory = (histories) => {
     const totalsByDate = new Map();
     histories.forEach((history) => {
         history.forEach((point) => {
-            const current = totalsByDate.get(point.date) ?? { inbound: 0, outbound: 0, adjustments: 0 };
+            const current = totalsByDate.get(point.date) ?? { inbound: 0, outbound: 0, adjustments: 0, transfers: 0 };
             current.inbound += toSafeNumber(point.inbound);
             current.outbound += toSafeNumber(point.outbound);
             current.adjustments += toSafeNumber(point.adjustments);
+            current.transfers += toSafeNumber(point.transfers);
             totalsByDate.set(point.date, current);
         });
     });
@@ -136,6 +192,7 @@ const aggregateMovementHistory = (histories) => {
         inbound: totals.inbound,
         outbound: totals.outbound,
         adjustments: totals.adjustments,
+        transfers: totals.transfers,
     }))
         .sort((a, b) => a.date.localeCompare(b.date));
 };
@@ -202,8 +259,9 @@ const zeroFillDailySeries = (range, points) => {
         const inbound = toSafeNumber(point?.inbound ?? 0);
         const outbound = toSafeNumber(point?.outbound ?? 0);
         const adjustments = toSafeNumber(point?.adjustments ?? 0);
+        const transfers = toSafeNumber(point?.transfers ?? 0);
         const net = inbound - outbound + adjustments;
-        return { date, inbound, outbound, adjustments, net };
+        return { date, inbound, outbound, adjustments, net, transfers };
     });
 };
 const getWeekStart = (value) => {
@@ -251,11 +309,13 @@ const groupDailySeries = (daily, groupBy, startingOnHand, currentReserved, safet
             outbound: 0,
             adjustments: 0,
             net: 0,
+            transfers: 0,
         };
         bucket.inbound += point.inbound;
         bucket.outbound += point.outbound;
         bucket.adjustments += point.adjustments;
         bucket.net += point.net;
+        bucket.transfers += point.transfers;
         if (periodEnd.getTime() > bucket.end.getTime()) {
             bucket.end = periodEnd;
         }
@@ -275,6 +335,7 @@ const groupDailySeries = (daily, groupBy, startingOnHand, currentReserved, safet
             outbound: bucket.outbound,
             adjustments: bucket.adjustments,
             net: bucket.net,
+            transfers: bucket.transfers,
             endingOnHand,
             endingAvailable,
             safetyStock,
@@ -511,6 +572,7 @@ export default async function inventoryDashboardRoutes(server) {
                 inbound: totals.inbound,
                 outbound: totals.outbound,
                 adjustments: totals.adjustments,
+                transfers: totals.transfers,
                 net: totals.inbound - totals.outbound + totals.adjustments,
                 currentOnHand: currentTotals.onHand,
                 currentReserved: currentTotals.reserved,
@@ -520,11 +582,12 @@ export default async function inventoryDashboardRoutes(server) {
                 stockoutEtaDays,
                 projectedStockoutDate,
             },
-            movementSeries: dailySeries.map(({ date, inbound, outbound, adjustments }) => ({
+            movementSeries: dailySeries.map(({ date, inbound, outbound, adjustments, transfers }) => ({
                 date,
                 inbound,
                 outbound,
                 adjustments,
+                transfers,
             })),
             stockSeries,
             periodSeries,
@@ -575,6 +638,13 @@ export default async function inventoryDashboardRoutes(server) {
             const stockoutEtaSku = avgDailyOutboundSku > 0 ? summary.available / avgDailyOutboundSku : null;
             const projectedStockoutDateSku = computeProjectedStockoutDate(summary.available, avgDailyOutboundSku);
             const safetyStock = computeSafetyStock(product);
+            const { score: riskScore, label: riskLabel } = computeRiskScoreForItem({
+                available: summary.available,
+                safetyStock,
+                avgDailyInbound: avgDailyInboundSku,
+                avgDailyOutbound: avgDailyOutboundSku,
+                trend: skuSeries,
+            });
             return {
                 sku: product.sku,
                 name: product.name,
@@ -589,6 +659,9 @@ export default async function inventoryDashboardRoutes(server) {
                 avgDailyOutbound: avgDailyOutboundSku,
                 stockoutEtaDays: stockoutEtaSku,
                 projectedStockoutDate: projectedStockoutDateSku,
+                riskScore,
+                riskLabel,
+                riskModelVersion: RISK_MODEL_VERSION,
                 trend: skuSeries.map(({ date, outbound }) => ({ date, outbound })),
             };
         })

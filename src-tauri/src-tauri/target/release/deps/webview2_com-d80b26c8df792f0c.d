@@ -1,0 +1,10 @@
+C:\Users\dbcdk\Desktop\재고관리 한국버젼 API LLM모델 연결버젼 챗봇 포함\src-tauri\src-tauri/target\release\deps\webview2_com-d80b26c8df792f0c.d: C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\lib.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\callback.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\options.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\pwstr.rs
+
+C:\Users\dbcdk\Desktop\재고관리 한국버젼 API LLM모델 연결버젼 챗봇 포함\src-tauri\src-tauri/target\release\deps\libwebview2_com-d80b26c8df792f0c.rlib: C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\lib.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\callback.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\options.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\pwstr.rs
+
+C:\Users\dbcdk\Desktop\재고관리 한국버젼 API LLM모델 연결버젼 챗봇 포함\src-tauri\src-tauri/target\release\deps\libwebview2_com-d80b26c8df792f0c.rmeta: C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\lib.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\callback.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\options.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\pwstr.rs
+
+C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\lib.rs:
+C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\callback.rs:
+C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\options.rs:
+C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\webview2-com-0.38.0\src\pwstr.rs:

@@ -2,7 +2,8 @@ import OpenAI from 'openai';
 import { APIError, APIConnectionError, APIConnectionTimeoutError } from 'openai/error';
 import { savePolicyDrafts, listPolicyDrafts, deletePolicyDrafts, upsertPolicyDraft, hasPolicyDraft, } from '../stores/policiesStore.js';
 import { getDailyMovementHistory } from '../stores/movementAnalyticsStore.js';
-import { __getProductRecords, ensurePolicyDraftForProduct } from './products.js';
+import { __getProductRecords, ensurePolicyDraftForProduct, } from './products.js';
+import { computeLeadTimeBaseline, computeServiceLevelBaseline, LEAD_TIME_ADJUST_MAX_PCT, SERVICE_LEVEL_ADJUST_MAX_PCT, } from '../services/forecastBaselines.js';
 const apiKey = process.env.OPENAI_API_KEY;
 const openaiClient = apiKey ? new OpenAI({ apiKey }) : null;
 // Allow overriding the OpenAI chat model via env. Falls back to gpt-5.
@@ -91,6 +92,42 @@ const clampServiceLevelPercent = (value) => {
     }
     const clamped = Math.max(50, Math.min(99.9, value));
     return Math.round(clamped * 10) / 10;
+};
+const applyLeadTimeCandidate = (baseline, candidate) => {
+    const resolvedBaseline = baseline !== null && Number.isFinite(baseline) ? Math.max(0, Math.round(baseline)) : DEFAULT_LEAD_TIME_DAYS;
+    if (candidate === null || !Number.isFinite(candidate)) {
+        return { value: resolvedBaseline };
+    }
+    const normalizedCandidate = Math.max(0, Math.round(candidate));
+    const allowance = Math.max(1, Math.round(resolvedBaseline * LEAD_TIME_ADJUST_MAX_PCT));
+    if (Math.abs(normalizedCandidate - resolvedBaseline) <= allowance) {
+        return { value: normalizedCandidate };
+    }
+    const direction = normalizedCandidate > resolvedBaseline ? 1 : -1;
+    const adjusted = Math.max(0, resolvedBaseline + direction * allowance);
+    return {
+        value: adjusted,
+        note: `LLM 제안 리드타임(${normalizedCandidate}일)이 ±${allowance}일 범위를 벗어나 ${adjusted}일로 제한했습니다.`,
+    };
+};
+const applyServiceLevelCandidate = (baseline, candidate) => {
+    if (!Number.isFinite(baseline)) {
+        baseline = DEFAULT_SERVICE_LEVEL_PERCENT;
+    }
+    if (candidate === null || !Number.isFinite(candidate)) {
+        return { value: baseline };
+    }
+    const normalized = clampServiceLevelPercent(candidate) ?? baseline;
+    const delta = normalized - baseline;
+    if (Math.abs(delta) <= SERVICE_LEVEL_ADJUST_MAX_PCT) {
+        return { value: normalized };
+    }
+    const direction = delta > 0 ? 1 : -1;
+    const limited = clampServiceLevelPercent(baseline + direction * SERVICE_LEVEL_ADJUST_MAX_PCT) ?? baseline;
+    return {
+        value: limited,
+        note: `LLM 제안 서비스 수준(${normalized}%)이 ±${SERVICE_LEVEL_ADJUST_MAX_PCT}%p 범위를 벗어나 ${limited}%로 조정했습니다.`,
+    };
 };
 const toNonNegativeInteger = (value) => {
     if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -717,12 +754,17 @@ export default async function policyRoutes(server) {
     });
     server.post('/recommend-forecast', async (request, reply) => {
         const body = request.body ?? {};
+        const normalizedSku = typeof body.product?.sku === 'string' ? body.product.sku.trim().toUpperCase() : '';
+        const leadTimeBaseline = computeLeadTimeBaseline({ sku: normalizedSku });
+        const serviceLevelBaseline = computeServiceLevelBaseline({ sku: normalizedSku });
         const baselineResolution = resolveForecastBaseline(body);
         const baseline = baselineResolution.baseline;
         const baselineForecast = baseline?.forecastDemand ?? null;
         const baselineStd = baseline?.demandStdDev ?? null;
-        const fallbackLeadTime = resolveLeadTimeDays(body.metrics?.leadTimeDays) ?? DEFAULT_LEAD_TIME_DAYS;
-        const fallbackServiceLevel = resolveServiceLevel(body.metrics?.serviceLevelPercent) ?? DEFAULT_SERVICE_LEVEL_PERCENT;
+        const metricsLeadTime = resolveLeadTimeDays(body.metrics?.leadTimeDays);
+        const fallbackLeadTime = metricsLeadTime ?? leadTimeBaseline.leadTimeDays ?? DEFAULT_LEAD_TIME_DAYS;
+        const metricsServiceLevel = resolveServiceLevel(body.metrics?.serviceLevelPercent);
+        const fallbackServiceLevel = metricsServiceLevel ?? serviceLevelBaseline.serviceLevelPercent;
         let finalForecastDemand = baselineForecast;
         let finalDemandStdDev = baselineStd;
         let finalLeadTimeDays = fallbackLeadTime;
@@ -730,7 +772,11 @@ export default async function policyRoutes(server) {
         let rawText = 'Baseline recommendation';
         let llmApplied = false;
         let deviationExceeded = false;
-        const notes = [...baselineResolution.notes];
+        const notes = [
+            ...baselineResolution.notes,
+            ...leadTimeBaseline.notes,
+            ...serviceLevelBaseline.notes,
+        ];
         if (baseline) {
             rawText = formatComputationSummary(baseline);
         }
@@ -786,8 +832,18 @@ export default async function policyRoutes(server) {
                 if (candidateStd !== null) {
                     finalDemandStdDev = candidateStd;
                 }
-                finalLeadTimeDays = resolveLeadTimeDays(llmResult.leadTimeDays) ?? finalLeadTimeDays;
-                finalServiceLevelPercent = resolveServiceLevel(llmResult.serviceLevelPercent) ?? finalServiceLevelPercent;
+                const llmLeadTimeCandidate = resolveLeadTimeDays(llmResult.leadTimeDays);
+                const leadTimeAdjustment = applyLeadTimeCandidate(finalLeadTimeDays, llmLeadTimeCandidate);
+                finalLeadTimeDays = leadTimeAdjustment.value;
+                if (leadTimeAdjustment.note) {
+                    notes.push(leadTimeAdjustment.note);
+                }
+                const llmServiceLevelRaw = toNullableNumber(llmResult.serviceLevelPercent);
+                const serviceLevelAdjustment = applyServiceLevelCandidate(finalServiceLevelPercent, llmServiceLevelRaw);
+                finalServiceLevelPercent = serviceLevelAdjustment.value;
+                if (serviceLevelAdjustment.note) {
+                    notes.push(serviceLevelAdjustment.note);
+                }
                 rawText = llmResult.rawText?.trim() || 'LLM recommendation';
             }
         }

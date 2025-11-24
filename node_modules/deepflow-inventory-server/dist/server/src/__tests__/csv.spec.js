@@ -27,7 +27,7 @@ describe('CSV upload routes', () => {
                 totalOutbound: 420,
                 avgOutbound7d: 16,
                 inventory: [
-                    { warehouseCode: 'WH-SEOUL', locationCode: 'SEOUL-A1', onHand: 240, reserved: 20 },
+                    { warehouseCode: 'WH-SEOUL', onHand: 240, reserved: 20 },
                 ],
             },
         });

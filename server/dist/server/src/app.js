@@ -1,7 +1,6 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import healthRoutes from './routes/health.js';
-import chatbotRoutes from './routes/chatbot.js';
 import forecastRoutes from './routes/forecast.js';
 import movementRoutes from './routes/movements.js';
 import policyRoutes from './routes/policies.js';
@@ -14,15 +13,18 @@ import productImagesRoutes from './routes/productImages.js';
 import inventoryDashboardRoutes from './routes/inventoryDashboard.js';
 import actionPlanRoutes from './routes/actionPlans.js';
 import purchaseOrdersRoutes from './routes/purchaseOrders.js';
+import partnersRoutes from './routes/partners.js';
 import salesOrdersRoutes from './routes/salesOrders.js';
 import leadTimeRoutes from './routes/leadTime.js';
 import taxTypesRoutes from './routes/taxTypes.js';
+import chatbotRoutes from './routes/chatbot.js';
 import { ensureWarehouseSeedData } from './stores/warehousesStore.js';
 import { ensureLocationSeedData } from './stores/locationsStore.js';
 import { startPendingMovementScheduler, stopPendingMovementScheduler, } from './services/pendingMovementScheduler.js';
 export async function buildServer() {
     const server = Fastify({
         logger: true,
+        ignoreTrailingSlash: true,
     });
     await server.register(cors, { origin: true });
     await server.register(healthRoutes, { prefix: '/api/health' });
@@ -43,6 +45,7 @@ export async function buildServer() {
     await server.register(inventoryDashboardRoutes, { prefix: '/api/inventory' });
     await server.register(leadTimeRoutes, { prefix: '/api/leadtime' });
     await server.register(purchaseOrdersRoutes, { prefix: '/api/purchase-orders' });
+    await server.register(partnersRoutes, { prefix: '/api/partners' });
     await server.register(salesOrdersRoutes, { prefix: '/api/sales-orders' });
     startPendingMovementScheduler();
     server.addHook('onClose', () => {

@@ -1,12 +1,10 @@
 const inventoryStore = new Map();
 const skuIndex = new Map();
 const warehouseIndex = new Map();
-const locationIndex = new Map();
 const totalsBySku = new Map();
 const totalsByWarehouse = new Map();
-const totalsByLocation = new Map();
 let overallTotals = { onHand: 0, reserved: 0 };
-const keyFor = (sku, warehouseCode, locationCode) => `${sku}::${warehouseCode}::${locationCode}`;
+const keyFor = (sku, warehouseCode) => `${sku}::${warehouseCode}`;
 const cloneRecord = (record) => ({ ...record });
 const ensureIndexSet = (index, targetKey) => {
     const existing = index.get(targetKey);
@@ -47,18 +45,16 @@ const applyOverallDelta = (deltaOnHand, deltaReserved) => {
     };
 };
 const setRecord = (record) => {
-    const recordKey = keyFor(record.sku, record.warehouseCode, record.locationCode);
+    const recordKey = keyFor(record.sku, record.warehouseCode);
     const previous = inventoryStore.get(recordKey);
     inventoryStore.set(recordKey, cloneRecord(record));
     addIndexEntry(skuIndex, record.sku, recordKey);
     addIndexEntry(warehouseIndex, record.warehouseCode, recordKey);
-    addIndexEntry(locationIndex, record.locationCode, recordKey);
     const deltaOnHand = record.onHand - (previous?.onHand ?? 0);
     const deltaReserved = record.reserved - (previous?.reserved ?? 0);
     if (deltaOnHand !== 0 || deltaReserved !== 0) {
         applyTotalsDelta(totalsBySku, record.sku, deltaOnHand, deltaReserved);
         applyTotalsDelta(totalsByWarehouse, record.warehouseCode, deltaOnHand, deltaReserved);
-        applyTotalsDelta(totalsByLocation, record.locationCode, deltaOnHand, deltaReserved);
         applyOverallDelta(deltaOnHand, deltaReserved);
     }
     return recordKey;
@@ -71,10 +67,8 @@ const removeRecordByKey = (recordKey) => {
     inventoryStore.delete(recordKey);
     removeIndexEntry(skuIndex, existing.sku, recordKey);
     removeIndexEntry(warehouseIndex, existing.warehouseCode, recordKey);
-    removeIndexEntry(locationIndex, existing.locationCode, recordKey);
     applyTotalsDelta(totalsBySku, existing.sku, -existing.onHand, -existing.reserved);
     applyTotalsDelta(totalsByWarehouse, existing.warehouseCode, -existing.onHand, -existing.reserved);
-    applyTotalsDelta(totalsByLocation, existing.locationCode, -existing.onHand, -existing.reserved);
     applyOverallDelta(-existing.onHand, -existing.reserved);
 };
 export function listInventoryForSku(sku) {
@@ -120,48 +114,6 @@ export function deleteInventoryByWarehouse(warehouseCode) {
         removeRecordByKey(recordKey);
     });
 }
-export function deleteInventoryByLocation(locationCode) {
-    const keys = locationIndex.get(locationCode);
-    if (!keys) {
-        return;
-    }
-    Array.from(keys).forEach((recordKey) => {
-        removeRecordByKey(recordKey);
-    });
-}
-export function updateInventoryWarehouseForLocation(locationCode, newWarehouseCode) {
-    const keys = new Set(locationIndex.get(locationCode) ?? []);
-    keys.forEach((recordKey) => {
-        const existing = inventoryStore.get(recordKey);
-        if (!existing) {
-            return;
-        }
-        removeRecordByKey(recordKey);
-        setRecord({
-            ...existing,
-            warehouseCode: newWarehouseCode,
-        });
-    });
-}
-export function renameInventoryLocation(oldLocationCode, newLocationCode, newWarehouseCode) {
-    if (oldLocationCode === newLocationCode) {
-        updateInventoryWarehouseForLocation(oldLocationCode, newWarehouseCode);
-        return;
-    }
-    const keys = new Set(locationIndex.get(oldLocationCode) ?? []);
-    keys.forEach((recordKey) => {
-        const existing = inventoryStore.get(recordKey);
-        if (!existing) {
-            return;
-        }
-        removeRecordByKey(recordKey);
-        setRecord({
-            ...existing,
-            warehouseCode: newWarehouseCode,
-            locationCode: newLocationCode,
-        });
-    });
-}
 export function summarizeInventory(sku) {
     const items = listInventoryForSku(sku);
     const totals = totalsBySku.get(sku) ?? { onHand: 0, reserved: 0 };
@@ -182,13 +134,116 @@ export function getWarehouseTotals() {
         reserved: totals.reserved,
     }));
 }
-export function getLocationTotals() {
-    return Array.from(totalsByLocation.entries()).map(([locationCode, totals]) => ({
-        locationCode,
-        onHand: totals.onHand,
-        reserved: totals.reserved,
-    }));
+const recordEntriesForSku = (sku) => {
+    const keys = skuIndex.get(sku);
+    if (!keys || keys.size === 0) {
+        return [];
+    }
+    return Array.from(keys)
+        .map((recordKey) => {
+        const record = inventoryStore.get(recordKey);
+        if (!record) {
+            return null;
+        }
+        return { key: recordKey, record };
+    })
+        .filter((entry) => Boolean(entry));
+};
+const clampReserved = (record, nextReserved) => {
+    const normalized = Math.max(0, Math.min(record.onHand, Math.round(nextReserved)));
+    return normalized;
+};
+const changeReservedOnRecord = (recordKey, delta) => {
+    const record = inventoryStore.get(recordKey);
+    if (!record || !Number.isFinite(delta)) {
+        return 0;
+    }
+    const updatedReserved = clampReserved(record, record.reserved + delta);
+    if (updatedReserved === record.reserved) {
+        return 0;
+    }
+    setRecord({ ...record, reserved: updatedReserved });
+    return updatedReserved - record.reserved;
+};
+export class InventoryReservationError extends Error {
 }
+export const getAvailableInventoryForSku = (sku) => {
+    const totals = totalsBySku.get(sku);
+    if (!totals) {
+        return 0;
+    }
+    return Math.max(0, totals.onHand - totals.reserved);
+};
+const sortByAvailable = (entries) => entries.sort((a, b) => {
+    const availableA = Math.max(0, a.record.onHand - a.record.reserved);
+    const availableB = Math.max(0, b.record.onHand - b.record.reserved);
+    return availableB - availableA;
+});
+const sortByReserved = (entries) => entries.sort((a, b) => b.record.reserved - a.record.reserved);
+export const reserveInventoryForSku = (sku, quantity) => {
+    const roundedQty = Math.max(0, Math.round(quantity));
+    if (roundedQty === 0) {
+        return;
+    }
+    const available = getAvailableInventoryForSku(sku);
+    if (roundedQty > available) {
+        throw new InventoryReservationError(`SKU ${sku} has only ${available} available units.`);
+    }
+    let remaining = roundedQty;
+    const entries = sortByAvailable(recordEntriesForSku(sku));
+    for (const entry of entries) {
+        if (remaining <= 0) {
+            break;
+        }
+        const free = Math.max(0, entry.record.onHand - entry.record.reserved);
+        if (free <= 0) {
+            continue;
+        }
+        const allocate = Math.min(free, remaining);
+        const delta = changeReservedOnRecord(entry.key, allocate);
+        remaining -= delta;
+    }
+    if (remaining > 0) {
+        throw new InventoryReservationError(`Failed to reserve ${roundedQty} units for SKU ${sku}.`);
+    }
+};
+const releaseReservationFromRecord = (recordKey, quantity) => {
+    const rounded = Math.max(0, Math.round(quantity));
+    if (rounded === 0) {
+        return 0;
+    }
+    const record = inventoryStore.get(recordKey);
+    if (!record) {
+        return 0;
+    }
+    const releasable = Math.min(record.reserved, rounded);
+    if (releasable <= 0) {
+        return 0;
+    }
+    const delta = changeReservedOnRecord(recordKey, -releasable);
+    return Math.abs(delta);
+};
+export const releaseInventoryReservation = (sku, quantity, preferredWarehouse) => {
+    const roundedQty = Math.max(0, Math.round(quantity));
+    if (roundedQty === 0) {
+        return;
+    }
+    let remaining = roundedQty;
+    if (preferredWarehouse) {
+        const key = keyFor(sku, preferredWarehouse);
+        remaining -= releaseReservationFromRecord(key, remaining);
+    }
+    if (remaining <= 0) {
+        return;
+    }
+    const entries = sortByReserved(recordEntriesForSku(sku));
+    for (const entry of entries) {
+        if (remaining <= 0) {
+            break;
+        }
+        remaining -= releaseReservationFromRecord(entry.key, remaining);
+    }
+};
 export function __resetInventoryStore() {
     inventoryStore.clear();
     skuIndex.clear();

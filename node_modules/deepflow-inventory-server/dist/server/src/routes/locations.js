@@ -1,6 +1,5 @@
 import { createLocation, deleteLocation, ensureLocationSeedData, findLocationByCode, listLocations, renameLocation, updateLocation, } from '../stores/locationsStore.js';
 import { findWarehouseByCode } from '../stores/warehousesStore.js';
-import { updateInventoryWarehouseForLocation } from '../stores/inventoryStore.js';
 const isNonEmptyString = (value) => typeof value === 'string' && value.trim().length > 0;
 function normalize(value) {
     return typeof value === 'string' ? value.trim() : '';
@@ -98,9 +97,6 @@ export default async function locationsRoutes(server) {
             updated = renameLocation(code, value);
         }
         else {
-            if (existing.warehouseCode !== value.warehouseCode) {
-                updateInventoryWarehouseForLocation(code, value.warehouseCode);
-            }
             updated = updateLocation(code, {
                 warehouseCode: value.warehouseCode,
                 description: value.description,

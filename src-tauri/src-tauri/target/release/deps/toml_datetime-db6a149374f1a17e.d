@@ -1,0 +1,10 @@
+C:\Users\dbcdk\Desktop\재고관리 한국버젼 API LLM모델 연결버젼 챗봇 포함\src-tauri\src-tauri/target\release\deps\toml_datetime-db6a149374f1a17e.d: C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\lib.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\datetime.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\de.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\ser.rs
+
+C:\Users\dbcdk\Desktop\재고관리 한국버젼 API LLM모델 연결버젼 챗봇 포함\src-tauri\src-tauri/target\release\deps\libtoml_datetime-db6a149374f1a17e.rlib: C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\lib.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\datetime.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\de.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\ser.rs
+
+C:\Users\dbcdk\Desktop\재고관리 한국버젼 API LLM모델 연결버젼 챗봇 포함\src-tauri\src-tauri/target\release\deps\libtoml_datetime-db6a149374f1a17e.rmeta: C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\lib.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\datetime.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\de.rs C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\ser.rs
+
+C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\lib.rs:
+C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\datetime.rs:
+C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\de.rs:
+C:\Users\dbcdk\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\toml_datetime-0.7.3\src\ser.rs:

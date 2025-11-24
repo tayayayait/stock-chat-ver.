@@ -79,6 +79,14 @@ export const formatDateTimeLocalFromUtc = (input) => {
     }
     return formatDateTimeLocalCore(utcMs);
 };
+export const formatKstDateLabelFromUtc = (input) => {
+    const utcMs = coerceUtcMs(input);
+    if (utcMs === null) {
+        return null;
+    }
+    const parts = buildShiftedParts(utcMs, KST_OFFSET_MS);
+    return `${parts.year}-${parts.month}-${parts.day}`;
+};
 export const formatKstDateTimeLabelFromUtc = (input, options) => {
     const utcMs = coerceUtcMs(input);
     if (utcMs === null) {

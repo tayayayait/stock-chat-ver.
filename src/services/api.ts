@@ -32,7 +32,7 @@ const readViteEnv = () => {
 };
 
 const TAURI_LOCALHOST = 'tauri.localhost';
-const PRODUCTION_API_BASE_FALLBACK = 'https://asdfasdf-api.onrender.com/api';
+const PRODUCTION_API_BASE_FALLBACK = 'https://stock-chat-ver.onrender.com/api';
 
 const resolveBaseURL = () => {
   const envUrl = (readViteEnv().VITE_API_URL ?? '').trim();

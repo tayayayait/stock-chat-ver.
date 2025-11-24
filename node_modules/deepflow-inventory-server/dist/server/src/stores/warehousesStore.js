@@ -65,7 +65,15 @@ export function ensureWarehouseSeedData() {
 }
 export function listWarehouses() {
     ensureWarehouseSeedData();
-    return Array.from(warehouseStore.values()).sort((a, b) => a.code.localeCompare(b.code));
+    return Array.from(warehouseStore.values()).sort((a, b) => {
+        const aCreated = a.createdAt ?? '';
+        const bCreated = b.createdAt ?? '';
+        const byCreated = aCreated.localeCompare(bCreated);
+        if (byCreated !== 0) {
+            return byCreated;
+        }
+        return a.code.localeCompare(b.code);
+    });
 }
 export function findWarehouseByCode(code) {
     ensureWarehouseSeedData();

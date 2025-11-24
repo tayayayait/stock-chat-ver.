@@ -34,7 +34,10 @@ const buildPurchaseOrderPayload = (body) => ({
     vendorName: typeof body.vendorName === 'string' ? body.vendorName : undefined,
     orderNumber: typeof body.orderNumber === 'string' ? body.orderNumber : undefined,
     orderDate: typeof body.orderDate === 'string' ? body.orderDate : undefined,
-    memo: body.memo,
+    receivingMode: typeof body.receivingMode === 'string' ? body.receivingMode : undefined,
+    receivingNote: typeof body.receivingNote === 'string' ? body.receivingNote : undefined,
+    warehouse: typeof body.warehouse === 'string' ? body.warehouse : undefined,
+    memo: typeof body.memo === 'string' ? body.memo : body.receivingNote,
     promisedDate: body.promisedDate,
     lines: normalizePurchaseOrderLines(body.lines),
 });

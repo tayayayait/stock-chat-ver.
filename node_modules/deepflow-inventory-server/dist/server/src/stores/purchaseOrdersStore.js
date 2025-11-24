@@ -144,6 +144,9 @@ export const createPurchaseOrder = (input) => {
     const sanitizedVendorName = sanitizeStringValue(input.vendorName) ?? sanitizedVendorId;
     const sanitizedOrderNumber = sanitizeStringValue(input.orderNumber) ?? id;
     const sanitizedLines = input.lines.map(sanitizeLineInput);
+    const sanitizedReceivingMode = sanitizeStringValue(input.receivingMode);
+    const sanitizedReceivingNote = sanitizeStringValue(input.receivingNote);
+    const sanitizedWarehouse = sanitizeStringValue(input.warehouse);
     const lines = buildLineRecords(id, sanitizedLines, now);
     const orderDateContext = resolveOrderDateContext(input.orderDate);
     const isDraft = input.status === 'draft';
@@ -160,6 +163,9 @@ export const createPurchaseOrder = (input) => {
         vendorId: sanitizedVendorId,
         vendorName: sanitizedVendorName,
         orderNumber: finalOrderNumber,
+        receivingMode: sanitizedReceivingMode,
+        receivingNote: sanitizedReceivingNote,
+        warehouse: sanitizedWarehouse,
         memo: input.memo?.trim() || null,
         status: recordStatus,
         createdAt: now,
@@ -190,6 +196,15 @@ const applyDraftUpdate = (record, input) => {
     if (input.promisedDate !== undefined) {
         const trimmedDate = input.promisedDate.trim();
         record.promisedDate = trimmedDate === '' ? null : trimmedDate;
+    }
+    if (input.receivingMode !== undefined) {
+        record.receivingMode = sanitizeStringValue(input.receivingMode);
+    }
+    if (input.receivingNote !== undefined) {
+        record.receivingNote = sanitizeStringValue(input.receivingNote);
+    }
+    if (input.warehouse !== undefined) {
+        record.warehouse = sanitizeStringValue(input.warehouse);
     }
     if (input.lines) {
         const sanitizedLines = input.lines.map(sanitizeLineInput);

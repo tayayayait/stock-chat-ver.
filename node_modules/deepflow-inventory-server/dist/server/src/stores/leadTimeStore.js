@@ -54,37 +54,50 @@ const computeStatistics = (values) => {
         recent: sorted[n - 1],
     };
 };
-export const getLeadTimeStats = (sku, vendorId) => {
-    const normalizedSku = sku.trim().toUpperCase();
-    const normalizedVendor = vendorId.trim().toUpperCase();
-    const relevant = Array.from(samples.values()).filter((entry) => entry.sku === normalizedSku && entry.vendorId === normalizedVendor && entry.firstReceiptAt);
-    const durations = [];
-    let lastSampleAt = null;
-    relevant.forEach((entry) => {
-        if (!entry.firstReceiptAt)
-            return;
-        const start = new Date(entry.approvedAt).getTime();
-        const end = entry.finalReceiptAt
-            ? new Date(entry.finalReceiptAt).getTime()
-            : new Date(entry.firstReceiptAt).getTime();
-        if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
-            durations.push(Math.round((end - start) / 86_400_000));
-            lastSampleAt = entry.createdAt;
-        }
-    });
+const buildLeadTimeStats = (sku, vendorId, durations, lastSampleAt) => {
     const stats = computeStatistics(durations);
     if (!stats) {
         return null;
     }
     return {
-        sku: normalizedSku,
-        vendorId: normalizedVendor,
+        sku,
+        vendorId,
         count: stats.n,
         l50: stats.l50,
         l90: stats.l90,
         sigma: stats.stddev,
         lastSampleAt,
     };
+};
+const collectLeadTimeDurations = (entries) => {
+    const durations = [];
+    let lastSampleAt = null;
+    entries.forEach((entry) => {
+        if (!entry.firstReceiptAt) {
+            return;
+        }
+        const start = Date.parse(entry.approvedAt);
+        const end = entry.finalReceiptAt ? Date.parse(entry.finalReceiptAt) : Date.parse(entry.firstReceiptAt);
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+            return;
+        }
+        durations.push(Math.round((end - start) / 86_400_000));
+        lastSampleAt = entry.createdAt;
+    });
+    return { durations, lastSampleAt };
+};
+export const getLeadTimeStats = (sku, vendorId) => {
+    const normalizedSku = sku.trim().toUpperCase();
+    const normalizedVendor = vendorId.trim().toUpperCase();
+    const relevant = Array.from(samples.values()).filter((entry) => entry.sku === normalizedSku && entry.vendorId === normalizedVendor);
+    const { durations, lastSampleAt } = collectLeadTimeDurations(relevant);
+    return buildLeadTimeStats(normalizedSku, normalizedVendor, durations, lastSampleAt);
+};
+export const getLeadTimeStatsForSku = (sku) => {
+    const normalizedSku = sku.trim().toUpperCase();
+    const relevant = Array.from(samples.values()).filter((entry) => entry.sku === normalizedSku);
+    const { durations, lastSampleAt } = collectLeadTimeDurations(relevant);
+    return buildLeadTimeStats(normalizedSku, 'AGGREGATED', durations, lastSampleAt);
 };
 export const recordLeadTimeSample = (sku, vendorId, poId, lineId, approvedAt, firstReceiptAt) => recordFirstReceipt(sku, vendorId, poId, lineId, approvedAt, firstReceiptAt);
 export const recordFinalLeadTime = (poId, lineId, finalReceiptAt) => recordFinalReceipt(poId, lineId, finalReceiptAt);

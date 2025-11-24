@@ -182,6 +182,9 @@ const ProductCsvUploadDialog: React.FC<ProductCsvUploadDialogProps> = ({ open, o
                 <p className="text-xs text-slate-500">
                   CSV 형식, UTF-8 인코딩. 헤더 행이 포함되어야 합니다.
                 </p>
+                <p className="text-xs text-slate-500">
+                  필수 헤더: 제품명, SKU, 카테고리, 하위카테고리, 구매가, 판매가, 창고명, 총수량. 창고명에는 등록된 창고 이름 또는 코드만 입력하고 괄호 안의 상세위치를 더하지 마세요.
+                </p>
               </div>
               <div className="flex gap-2">
                 <button

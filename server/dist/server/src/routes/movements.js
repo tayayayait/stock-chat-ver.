@@ -1,5 +1,4 @@
 import { findWarehouseByCode } from '../stores/warehousesStore.js';
-import { findLocationByCode } from '../stores/locationsStore.js';
 import { listMovementRecords, clearMovementStore } from '../stores/movementsStore.js';
 import { enqueuePendingMovement, clearPendingMovements, } from '../stores/pendingMovementsStore.js';
 import { __resetMovementAnalytics } from '../stores/movementAnalyticsStore.js';
@@ -11,9 +10,24 @@ class ValidationError extends Error {
         this.errors = errors;
     }
 }
+const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+const parseDateParam = (value, parameter, endOfDay) => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+        throw new ValidationError([`${parameter} 파라미터가 올바른 날짜 형식이 아닙니다.`]);
+    }
+    const candidate = DATE_ONLY_REGEX.test(trimmed)
+        ? `${trimmed}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}Z`
+        : trimmed;
+    const parsed = Date.parse(candidate);
+    if (Number.isNaN(parsed)) {
+        throw new ValidationError([`${parameter} 파라미터가 올바른 날짜 형식이 아닙니다.`]);
+    }
+    return parsed;
+};
 const validateWarehouseConstraints = (draft) => {
     const errors = [];
-    const { type, fromWarehouse, toWarehouse, fromLocation, toLocation } = draft;
+    const { type, fromWarehouse, toWarehouse } = draft;
     const requireFrom = type === 'ISSUE' || type === 'TRANSFER';
     const requireTo = type === 'RECEIPT' || type === 'RETURN' || type === 'TRANSFER' || type === 'ADJUST';
     if (requireFrom && !fromWarehouse) {
@@ -27,24 +41,6 @@ const validateWarehouseConstraints = (draft) => {
     }
     if (toWarehouse && !findWarehouseByCode(toWarehouse)) {
         errors.push(`존재하지 않는 입고 물류센터 코드입니다: ${toWarehouse}`);
-    }
-    if (fromLocation) {
-        const location = findLocationByCode(fromLocation);
-        if (!location) {
-            errors.push(`알 수 없는 출고 로케이션 코드입니다: ${fromLocation}`);
-        }
-        else if (fromWarehouse && location.warehouseCode !== fromWarehouse) {
-            errors.push('출고 로케이션이 지정된 물류센터에 속하지 않습니다.');
-        }
-    }
-    if (toLocation) {
-        const location = findLocationByCode(toLocation);
-        if (!location) {
-            errors.push(`알 수 없는 입고 로케이션 코드입니다: ${toLocation}`);
-        }
-        else if (toWarehouse && location.warehouseCode !== toWarehouse) {
-            errors.push('입고 로케이션이 지정된 물류센터에 속하지 않습니다.');
-        }
     }
     if (errors.length > 0) {
         throw new ValidationError(errors);
@@ -64,18 +60,10 @@ const parseQueryDates = (query) => {
     let from;
     let to;
     if (query.from) {
-        const parsed = Date.parse(query.from);
-        if (Number.isNaN(parsed)) {
-            throw new ValidationError(['from 파라미터가 올바른 날짜 형식이 아닙니다.']);
-        }
-        from = parsed;
+        from = parseDateParam(query.from, 'from', false);
     }
     if (query.to) {
-        const parsed = Date.parse(query.to);
-        if (Number.isNaN(parsed)) {
-            throw new ValidationError(['to 파라미터가 올바른 날짜 형식이 아닙니다.']);
-        }
-        to = parsed;
+        to = parseDateParam(query.to, 'to', true);
     }
     return { from, to };
 };
@@ -146,11 +134,6 @@ export default async function movementRoutes(fastify) {
             if (request.query.warehouse) {
                 const matchWarehouse = movement.fromWarehouse === request.query.warehouse || movement.toWarehouse === request.query.warehouse;
                 if (!matchWarehouse)
-                    return false;
-            }
-            if (request.query.location) {
-                const matchLocation = movement.fromLocation === request.query.location || movement.toLocation === request.query.location;
-                if (!matchLocation)
                     return false;
             }
             if (parsedDates.from !== undefined && Date.parse(movement.occurredAt) < parsedDates.from) {
